@@ -33,6 +33,8 @@ class OptionStrategy:
       , "dte": 45
       , "dteThreshold": 21
       , "forceDteThreshold": False
+      # Credit Targeting: either using a fixed credit amount (targetPremium) or a dynamic credit (percentage of Net Liquidity)
+      , "targetPremiumPct": None
       , "targetPremium": None
       # Limit Order Management
       , "useLimitOrders": True
@@ -110,6 +112,14 @@ class OptionStrategy:
 
 
    # Interface method. Must be implemented by the inheriting class
+   def setupCharts(self):
+      pass
+      
+   # Interface method. Must be implemented by the inheriting class
+   def updateCharts(self):
+      pass
+      
+   # Interface method. Must be implemented by the inheriting class
    def getOrder(self, chain):
       pass
 
@@ -155,9 +165,27 @@ class OptionStrategy:
       # Return the filtered contracts
       return filteredChain
 
+   def getMaxOrderQuantity(self):
+      # Get the context
+      context = self.context
+      # Get the strategy parameters
+      parameters = self.parameters
+      
+      # Get the maximum order quantity parameter
+      maxOrderQuantity = parameters["maxOrderQuantity"]
+      # Get the targetPremiumPct
+      targetPremiumPct = parameters["targetPremiumPct"]
+      # Check if we are using dynamic premium targeting
+      if targetPremiumPct != None:
+         # Scale the maxOrderQuantity consistently with the portfolio growth
+         maxOrderQuantity = round(maxOrderQuantity * (1 + context.Portfolio.TotalProfit / context.initialAccountValue))
+         # Make sure we don't go below the initial parameter value
+         maxOrderQuantity = max(parameters["maxOrderQuantity"], maxOrderQuantity)
+      # Return the result   
+      return maxOrderQuantity
 
    # Create dictionary with the details of the order to be submitted
-   def getOrderDetails(self, contracts, sides, strategy, sell = True, strategyId = None):
+   def getOrderDetails(self, contracts, sides, strategy, sell = True, strategyId = None, expiry = None):
 
       # Exit if there are no contracts to process
       if contracts == None or len(contracts) == 0:
@@ -171,8 +199,8 @@ class OptionStrategy:
       # Set the Strategy Id (if not specified)
       strategyId = strategyId or strategy.replace(" ", "")
 
-      # Get the Expiration from the first contract
-      expiry = contracts[0].Expiry
+      # Get the Expiration from the first contract (unless otherwise specified
+      expiry = expiry or contracts[0].Expiry
       # Dictionary: maps each contract to the the side (short/long) 
       contractSide = {}
       # Dictionary to keep track of all the strikes, Delta and IV
@@ -185,12 +213,25 @@ class OptionStrategy:
       bidAskSpread = 0.0
       # Get the slippage parameter (if available)
       slippage = parameters["slippage"] or 0.0
-      # Get the targetPremium
-      targetPremium = parameters["targetPremium"] or 0.0
+         
       # Get the limitOrderRelativePriceAdjustment
       limitOrderRelativePriceAdjustment = parameters["limitOrderRelativePriceAdjustment"] or 0.0
       # Get the limitOrderAbsolutePrice 
       limitOrderAbsolutePrice = parameters["limitOrderAbsolutePrice"]
+
+
+      # Get the maximum order quantity
+      maxOrderQuantity = self.getMaxOrderQuantity()
+      # Get the targetPremiumPct
+      targetPremiumPct = parameters["targetPremiumPct"]
+      # Check if we are using dynamic premium targeting
+      if targetPremiumPct != None:
+         # Make sure targetPremiumPct is bounded to the range [0, 1])
+         targetPremiumPct = max(0.0, min(1.0, targetPremiumPct))
+         # Compute the target premium as a percentage of the total net portfolio value
+         targetPremium = context.Portfolio.TotalPortfolioValue * targetPremiumPct
+      else:
+         targetPremium = parameters["targetPremium"]
 
       n = 0
       for contract in contracts:
@@ -259,17 +300,25 @@ class OptionStrategy:
       # Exit if the price is zero
       if abs(qtyMidPrice) <= 1e-5:
          return
-         
-      if sell: # Credit order
+      
+
+      if targetPremium == None:
+         # No target premium was provided. Use maxOrderQuantity
+         orderQuantity = maxOrderQuantity
+      else:   
+         # Make sure we are not exceeding the available portfolio margin
+         targetPremium = min(context.Portfolio.MarginRemaining, targetPremium)
+
          # Determine the order quantity based on the target premium
-         orderQuantity = max(1, round(abs(targetPremium / (qtyMidPrice * 100))))
-      else: # Debit order
-         if parameters["targetPremium"] == None:
-            # No target premium was provided. Use maxOrderQuantity
-            orderQuantity = parameters["maxOrderQuantity"]
-         # Get the maximum number of contracts not exceeding the target debit amount
-         else:
-            orderQuantity = math.floor(abs(targetPremium / (qtyMidPrice * 100)))
+         orderQuantity = abs(targetPremium / (qtyMidPrice * 100))
+         
+         # Different logic for Credit vs Debit strategies
+         if sell: # Credit order
+            # Sell at least one contract
+            orderQuantity = max(1, round(orderQuantity))
+         else: # Debit order
+            # make sure the total price does not exceed the target premium
+            orderQuantity = math.floor(orderQuantity)
 
       # Create order details
       order = {"expiry": expiry
@@ -281,6 +330,8 @@ class OptionStrategy:
                , "deltas": deltas
                , "IVs": IVs
                , "contracts": contracts
+               , "targetPremium": targetPremium
+               , "maxOrderQuantity": maxOrderQuantity
                , "orderQuantity": orderQuantity
                , "creditStrategy": sell
                , "maxLoss": self.computeOrderMaxLoss(contracts, sides)
@@ -342,6 +393,8 @@ class OptionStrategy:
       deltas = order["deltas"]
       IVs = order["IVs"]
       expiry = order["expiry"]
+      targetPremium = order["targetPremium"]
+      maxOrderQuantity = order["maxOrderQuantity"]
       orderQuantity = order["orderQuantity"]
       bidAskSpread = order["open"]["bidAskSpread"]
       orderMidPrice = order["open"]["orderMidPrice"]
@@ -358,7 +411,7 @@ class OptionStrategy:
             # The sign of orderMidPrice must be consistent with whether this is a credit strategy (+1) or debit strategy (-1)
             or np.sign(orderMidPrice) != 2*int(order["creditStrategy"]) - 1
             # Exit if the order quantity exceeds the maxOrderQuantity
-            or (parameters["validateQuantity"] and orderQuantity > parameters["maxOrderQuantity"])
+            or (parameters["validateQuantity"] and orderQuantity > maxOrderQuantity)
             # Make sure the bid-ask spread is not too wide before opening the position. 
             # Only for Market orders. In case of limit orders, this validation is done at the time of execution of the Limit order
             or (useMarketOrders and parameters["validateBidAskSpread"] and abs(bidAskSpread) > parameters["bidAskSpreadRatio"]*abs(orderMidPrice))
@@ -385,7 +438,9 @@ class OptionStrategy:
                   , "openDTE"               : (expiry.date() - currentDttm.date()).days
                   , "closeDTE"              : float("NaN")
                   , "limitOrder"            : useLimitOrders
+                  , "targetPremium"         : targetPremium
                   , "orderQuantity"         : orderQuantity
+                  , "maxOrderQuantity"      : maxOrderQuantity
                   , "openOrderMidPrice"     : orderMidPrice
                   , "openOrderMidPrice.Min" : orderMidPrice
                   , "openOrderMidPrice.Max" : orderMidPrice
@@ -573,7 +628,9 @@ class OptionStrategy:
       positionQuantity = openPosition["orderQuantity"]
       # Get the side of each leg (-n -> Short, +n -> Long)
       contractSides = openPosition["contractSide"].values()
-      # Total number of legs in the position
+      # Leg Quantity
+      legQuantity = abs(openPosition["contractSide"][orderEvent.Symbol])
+      # Total legs quantity in the whole position
       Nlegs = sum(list(map(abs,contractSides)))
 
       # Check if the contract was filled at a stale price (Warnings in the orderTag)
@@ -590,7 +647,7 @@ class OptionStrategy:
       contractInfo["fills"] += abs(orderEvent.FillQuantity)
 
       # Remove this order entry from the self.workingOrders[orderTag] dictionary if it has been fully filled
-      if contractInfo["fills"] == positionQuantity:
+      if contractInfo["fills"] == legQuantity * positionQuantity:
          removedOrder = self.workingOrders[orderTag].pop(orderEvent.Symbol)
 
       # Update the counter of positions that have been filled
@@ -1068,7 +1125,7 @@ class OptionStrategy:
       return maxLoss
 
 
-   def getNakedOrder(self, contracts, type, strike = None, delta = None, sell = True):
+   def getNakedOrder(self, contracts, type, strike = None, delta = None, fromPrice = None, toPrice = None, sell = True):
       if sell:
          # Short option contract
          sides = [-1]
@@ -1081,10 +1138,10 @@ class OptionStrategy:
       type = type.lower()
       if type == "put":
          # Get all Puts with a strike lower than the given strike and delta lower than the given delta
-         sorted_contracts = self.strategyBuilder.getPuts(contracts, toDelta = delta, toStrike = strike)
+         sorted_contracts = self.strategyBuilder.getPuts(contracts, toDelta = delta, toStrike = strike, fromPrice = fromPrice, toPrice = toPrice)
       elif type == "call":
          # Get all Calls with a strike higher than the given strike and delta lower than the given delta
-         sorted_contracts = self.strategyBuilder.getCalls(contracts, toDelta = delta, fromStrike = strike)
+         sorted_contracts = self.strategyBuilder.getCalls(contracts, toDelta = delta, fromStrike = strike, fromPrice = fromPrice, toPrice = toPrice)
       else:
          self.logger.error(f"Input parameter type = {type} is invalid. Valid values: Put|Call.")
          return

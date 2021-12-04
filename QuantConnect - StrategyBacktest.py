@@ -26,8 +26,9 @@ class StrategyBacktest(QCAlgorithm):
       # Backtesting period
       self.SetStartDate(2021, 1, 1)
       self.SetEndDate(2021, 11, 30)
-      # Initial account value
-      self.SetCash(1000000)
+      # Store the initial account value
+      self.initialAccountValue = 1000000
+      self.SetCash(self.initialAccountValue)
       
       # Logging level: 
       #  -> 0 = ERROR
@@ -73,7 +74,12 @@ class StrategyBacktest(QCAlgorithm):
       self.limitOrderExpiration = timedelta(hours = 4)
       
       # Target <credit|debit> premium amount: used to determine the number of contracts needed to reach the desired target amount
+      #  - targetPremiumPct --> target premium is expressed as a percentage of the total Portfolio Net Liq (0 < targetPremiumPct < 1)
+      #  - targetPremium --> target premium is a fixed dollar amount
+      # If both are specified, targetPremiumPct takes precedence. If none of them are specified, the number of contracts specified by the maxOrderQuantity parameter is used.
+      self.targetPremiumPct = None
       self.targetPremium = 1000
+
       # Maximum quantity used to scale each position. If the target premium cannot be reached within this quantity (i.e. premium received is too low), the position is not going to be opened
       self.maxOrderQuantity = 20
       # If True, the order is submitted as long as it does not exceed the maxOrderQuantity.
@@ -141,10 +147,11 @@ class StrategyBacktest(QCAlgorithm):
       # self.strategies.append(IronCondorStrategy(self, putDelta = 10, callDelta = 10, putWingSize = 10, callWingSize = 10, creditStrategy = True))
       # self.strategies.append(IronFlyStrategy(self, netDelta = None, putWingSize = 10, callWingSize = 10, creditStrategy = True))
       # self.strategies.append(ButterflyStrategy(self, butteflyType = "Put", netDelta = None, butterflyLeftWingSize = 10, butterflyRightWingSize = 10, creditStrategy = True))
+      # self.strategies.append(TEBombShelterStrategy(self, delta = 15, frontDte = self.dte - 30, hedgeAllocation = 0.1, chartUpdateFrequency = 5))
 
-      
       # Coarse filter for the Universe selection. It selects nStrikes on both sides of the ATM strike for each available expiration
-      self.nStrikes = 200
+      self.nStrikesLeft = 200
+      self.nStrikesRight = 200
 
       # Time Resolution
       self.timeResolution = Resolution.Minute   # Resolution.Minute .Hour .Daily
@@ -163,13 +170,22 @@ class StrategyBacktest(QCAlgorithm):
       
       
       
-   def setupCharts(self):   
+   def setupCharts(self, openPositions = True, Stats = True, PnL = True, WinLossStats = True, Performance = True, LossDetails = True):
       
       # Initialize flag (used to trigger a chart update)
       self.statsUpdated = False
       
-      # Create a Stats object to store all the stats
-      self.stats = Stats()
+      # Create an object to store all the stats
+      self.stats = CustomObject()
+      
+      # Store the details about which charts will be plotted (there is a maximum of 10 series per backtest)
+      self.stats.plot = CustomObject()
+      self.stats.plot.openPositions = openPositions
+      self.stats.plot.Stats = Stats
+      self.stats.plot.PnL = PnL
+      self.stats.plot.WinLossStats = WinLossStats
+      self.stats.plot.Performance = Performance
+      self.stats.plot.LossDetails = LossDetails
       
       # Initialize performance metrics
       self.stats.won = 0
@@ -186,37 +202,52 @@ class StrategyBacktest(QCAlgorithm):
       self.stats.maxWin = 0.0
       self.stats.maxLoss = 0.0
       self.stats.testedCall = 0
-      self.stats.testedPut = 0      
+      self.stats.testedPut = 0
       
       # Setup Charts
-      activePositionsPlot = Chart('Open Positions')
-      activePositionsPlot.AddSeries(Series('Open Positions', SeriesType.Line, ''))
+      if openPositions:
+         activePositionsPlot = Chart('Open Positions')
+         activePositionsPlot.AddSeries(Series('Open Positions', SeriesType.Line, ''))
       
-      statsPlot = Chart('Stats')
-      statsPlot.AddSeries(Series('Won', SeriesType.Line, '', Color.Green))
-      statsPlot.AddSeries(Series('Lost', SeriesType.Line, '', Color.Red))
+      if Stats:
+         statsPlot = Chart('Stats')
+         statsPlot.AddSeries(Series('Won', SeriesType.Line, '', Color.Green))
+         statsPlot.AddSeries(Series('Lost', SeriesType.Line, '', Color.Red))
 
-      pnlPlot = Chart('Profit and Loss')
-      pnlPlot.AddSeries(Series('PnL', SeriesType.Line, ''))
+      if PnL:
+         pnlPlot = Chart('Profit and Loss')
+         pnlPlot.AddSeries(Series('PnL', SeriesType.Line, ''))
 
-      winLossStatsPlot = Chart('Win and Loss Stats')
-      winLossStatsPlot.AddSeries(Series('Average Win', SeriesType.Line, '$', Color.Green))
-      winLossStatsPlot.AddSeries(Series('Average Loss', SeriesType.Line, '$', Color.Red))
+      if WinLossStats:
+         winLossStatsPlot = Chart('Win and Loss Stats')
+         winLossStatsPlot.AddSeries(Series('Average Win', SeriesType.Line, '$', Color.Green))
+         winLossStatsPlot.AddSeries(Series('Average Loss', SeriesType.Line, '$', Color.Red))
 
-      performancePlot = Chart('Performance')
-      performancePlot.AddSeries(Series('Win Rate', SeriesType.Line, '%'))
-      performancePlot.AddSeries(Series('Premium Capture', SeriesType.Line, '%'))
+      if Performance:
+         performancePlot = Chart('Performance')
+         performancePlot.AddSeries(Series('Win Rate', SeriesType.Line, '%'))
+         performancePlot.AddSeries(Series('Premium Capture', SeriesType.Line, '%'))
 
       # Loss Details chart. Only relevant in case of credit strategies
-      lossPlot = Chart('Loss Details')
-      lossPlot.AddSeries(Series('Short Put Tested', SeriesType.Line, ''))
-      lossPlot.AddSeries(Series('Short Call Tested', SeriesType.Line, ''))
+      if LossDetails:
+         lossPlot = Chart('Loss Details')
+         lossPlot.AddSeries(Series('Short Put Tested', SeriesType.Line, ''))
+         lossPlot.AddSeries(Series('Short Call Tested', SeriesType.Line, ''))
+
+      # Call the chart initialization method of each strategy (give a chance to setup custom charts)
+      for strategy in self.strategies:
+         strategy.setupCharts()
 
       # Add the first data point to the charts
       self.statsUpdated = True
       self.updateCharts()
 
    def updateCharts(self):
+
+      # Call the updateCharts method of each strategy (give a chance to update any custom charts)
+      for strategy in self.strategies:
+         strategy.updateCharts()
+
       # Exit if there is nothing to update
       if not (self.statsUpdated or self.Time.time() == time(15, 59, 0)):
          return
@@ -224,17 +255,25 @@ class StrategyBacktest(QCAlgorithm):
       # Reset the flag
       self.statsUpdated = False
       
+      plotInfo = self.stats.plot
+      
       # Add the latest stats to the plots
-      self.Plot("Open Positions", "Open Positions", self.currentActivePositions)
-      self.Plot("Stats", "Won", self.stats.won)
-      self.Plot("Stats", "Lost", self.stats.lost)
-      self.Plot("Profit and Loss", "PnL", self.stats.PnL)
-      self.Plot("Win and Loss Stats", "Average Win", self.stats.averageWinAmt)
-      self.Plot("Win and Loss Stats", "Average Loss", self.stats.averageLossAmt)
-      self.Plot("Loss Details", "Short Put Tested", self.stats.testedPut)
-      self.Plot("Loss Details", "Short Call Tested", self.stats.testedCall)
-      self.Plot("Performance", "Win Rate", self.stats.winRate)
-      self.Plot("Performance", "Premium Capture", self.stats.premiumCaptureRate)
+      if plotInfo.openPositions:
+         self.Plot("Open Positions", "Open Positions", self.currentActivePositions)
+      if plotInfo.Stats:
+         self.Plot("Stats", "Won", self.stats.won)
+         self.Plot("Stats", "Lost", self.stats.lost)
+      if plotInfo.PnL:
+         self.Plot("Profit and Loss", "PnL", self.stats.PnL)
+      if plotInfo.WinLossStats:
+         self.Plot("Win and Loss Stats", "Average Win", self.stats.averageWinAmt)
+         self.Plot("Win and Loss Stats", "Average Loss", self.stats.averageLossAmt)
+      if plotInfo.Performance:
+         self.Plot("Performance", "Win Rate", self.stats.winRate)
+         self.Plot("Performance", "Premium Capture", self.stats.premiumCaptureRate)
+      if plotInfo.LossDetails:
+         self.Plot("Loss Details", "Short Put Tested", self.stats.testedPut)
+         self.Plot("Loss Details", "Short Call Tested", self.stats.testedCall)
       #self.Plot("Win & Loss Stats", "Max Win", self.stats.maxWin)
       #self.Plot("Win & Loss Stats", "Max Loss", -self.stats.maxLoss)
       #underlyingPrice = None
@@ -313,7 +352,7 @@ class StrategyBacktest(QCAlgorithm):
       # nStrikes contracts to each side of the ATM
       # Contracts expiring in the range (DTE-5, DTE)
       return universe.IncludeWeeklys()\
-                     .Strikes(-self.nStrikes, self.nStrikes)\
+                     .Strikes(-self.nStrikesLeft, self.nStrikesRight)\
                      .Expiration(max(0, self.dte - self.dteWindow), max(0, self.dte))
 
 
@@ -396,7 +435,7 @@ class StrategyBacktest(QCAlgorithm):
          minDte = max(0, self.dte - self.dteWindow)
          maxDte = max(0, self.dte)
          # Get the contracts
-         contracts = self.optionChainProviderFilter(symbols, -self.nStrikes, self.nStrikes, minDte, maxDte)
+         contracts = self.optionChainProviderFilter(symbols, -self.nStrikesLeft, self.nStrikesRight, minDte, maxDte)
       
       return contracts
 
@@ -500,9 +539,9 @@ class TastyWorksFeeModel:
       return OrderFee(CashAmount(optionFee + transactionFee, 'USD'))
 
 
-class Stats:
+# Dummy class useful to create empty objects
+class CustomObject:
    pass
-   
 
 # Custom Fill model based on Beta distribution:
 #  - Orders are filled based on a Beta distribution  skewed towards the mid-price with Sigma = bidAskSpread/6 (-> 99% fills within the bid-ask spread)

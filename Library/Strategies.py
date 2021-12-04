@@ -13,6 +13,7 @@
 ########################################################################################
 
 from OptionStrategy import *
+from System.Drawing import Color
 
 class PutStrategy(OptionStrategy):
    def getOrder(self, chain):
@@ -98,4 +99,162 @@ class ButterflyStrategy(OptionStrategy):
                                   , rightWingSize = self.parameters["butterflyRightWingSize"]
                                   , sell = self.parameters["creditStrategy"]
                                   )
+
+
+
+
+class TEBombShelterStrategy(OptionStrategy):
+
+   def run(self, chain, expiryList = None):
+   
+      context = self.context
       
+      if expiryList == None:
+         # List of expiry dates, sorted in reverse order
+         expiryList = sorted(set([contract.Expiry for contract in chain]), reverse = True)
+
+      # Log the list of expiration dates found in the chain
+      self.logger.trace("Expiration dates in the chain:")
+      for expiry in expiryList:
+         self.logger.trace(f" -> {expiry}")
+
+      # Get the furthest expiry date (Back cycle)
+      backExpiry = expiryList[0]
+      
+      # Get the list of expiry dates that are within the front-cycle DTE requirement
+      frontExpiryList = sorted([expiry for expiry in expiryList 
+                                   if (expiry.date() - context.Time.date()).days <= self.parameters["frontDte"]
+                               ]
+                               , reverse = True
+                               )
+
+      # Exit if we could not find any front-cycle expiration
+      if not frontExpiryList:
+         return
+      
+      # Get the furthest expiry date (Front cycle)
+      frontExpiry = frontExpiryList[0]
+      
+      # Convert the date to a string
+      expiryStr = frontExpiry.strftime("%Y-%m-%d")
+
+      # Proceed if we have not already opened a position on the given expiration
+      if(expiryStr not in self.openPositions):
+         # Filter the contracts in the chain, keep only the ones expiring on the back-cycle
+         backChain = self.filterByExpiry(chain, expiry = backExpiry, computeGreeks = True)
+         # Filter the contracts in the chain, keep only the ones expiring on the front-cycle
+         frontChain = self.filterByExpiry(chain, expiry = frontExpiry, computeGreeks = True)
+         
+         # Call the getOrder method of this class
+         order = self.getOrder(backChain, frontChain)
+         # Execute the order
+         self.openPosition(order)
+   
+
+
+
+   def getOrder(self, backChain, frontChain):
+   
+      # Theta Engine + Bomb Shelter combo: 1 short Put (back-cycle) and buy 2 long puts (front-cycle)
+      sides = [-1, 2]
+      strategy = "TE Bomb Shelter"
+
+      # Get the Strategy parameters
+      parameters = self.parameters
+      
+      # Set the Delta for the short Put
+      delta = parameters["delta"]
+      # Percentage of the premium alloated to the Bomb Shelter hedge
+      hedgeAllocation = parameters["hedgeAllocation"] or 0.0
+
+      # Get all Puts (back cycle) with a Delta lower than the given delta
+      back_contracts = self.strategyBuilder.getPuts(backChain, toDelta = delta)
+      
+      # Exit if we could not find a Put matching the specified Delta criteria
+      if not back_contracts:
+         return
+
+      # Get the short put (back cycle)
+      shortPut = back_contracts[0]
+      # Get the mid-price of the short put
+      midPrice = self.midPrice(shortPut)
+      # Set the target price for the long Puts
+      targetLongPrice = midPrice * hedgeAllocation / 2
+      
+      # Get all Puts (front cycle) with a price 
+      front_contracts = self.strategyBuilder.getPuts(frontChain, toPrice = targetLongPrice)
+
+      # Exit if we could not find a Put matching the specified price criteria
+      if not front_contracts:
+         return
+
+      # Get the long put (front cycle)
+      longPut = front_contracts[0]
+      
+      # Create order details
+      order = self.getOrderDetails([shortPut, longPut], sides, strategy, sell = True, expiry = longPut.Expiry)
+      
+      # Return the order
+      return order      
+
+   # Add BombShelter custom charts
+   def setupCharts(self):
+      self.TEBSPlot = Chart("TE Bomb Shelter")
+      self.TEBSPlotCount = 0
+      
+   # Update BombShelter custom charts
+   def updateCharts(self):
+      # Get the context
+      context = self.context
+      # Get the strategy parameters
+      parameters = self.parameters
+      
+      # Check if the chartUpdateFrequency parameter has been set
+      if not "chartUpdateFrequency" in parameters:
+         return
+      
+      # Get the chart update frequency
+      chartUpdateFrequency = parameters["chartUpdateFrequency"]
+       # Only run this at the specified frequency 
+      if chartUpdateFrequency == None or context.Time.minute % chartUpdateFrequency != 0:
+         return
+      
+      # loop through all the open positions (specific to this strategy)
+      for expiryStr in list(self.openPositions):
+         if expiryStr in self.openPositions:
+            # Extract the position and the order id
+            position = self.openPositions[expiryStr]
+            orderId = position["orderId"]
+
+            # Skip plotting this position if it's not yet filled or if it was filled at a stale price
+            if not position["open"]["filled"] or position["open"]["stalePrice"]:
+               continue
+            
+            # Get the Short and Long contracts
+            shortPut = position["contracts"][0]
+            longPut = position["contracts"][1]
+            
+            # Compute the current value of the contracts
+            shortValue = self.latestMidPrice(shortPut)
+            longValue = self.latestMidPrice(longPut) * 2
+            
+            # Define the stats variable names
+            shortVarName = f"TEBS_shortPut_{orderId}"
+            longVarName = f"TEBS_longPut_{orderId}"
+            
+            # Check if this is the first time that we are potting this data
+            if not hasattr(context.stats, shortVarName):
+               # Increase the plot counter. Each position will be plotted on a separate subplot (use TEBSPlotCount as the plot index level)
+               self.TEBSPlotCount += 1
+               # Add the time seroies
+               self.TEBSPlot.AddSeries(Series(f"{orderId} - Short Put ({shortPut.Strike})", SeriesType.Line, self.TEBSPlotCount))
+               self.TEBSPlot.AddSeries(Series(f"{orderId} - Long Put Hedge ({longPut.Strike})", SeriesType.Line, self.TEBSPlotCount))
+               
+            # Set/Update the stats variable
+            setattr(context.stats, shortVarName, shortValue)
+            setattr(context.stats, longVarName, longValue)
+            
+            # Plot the current value of the option contracts
+            context.Plot("TE Bomb Shelter", f"{orderId} - Short Put (Strike: {int(shortPut.Strike)})", shortValue)
+            context.Plot("TE Bomb Shelter", f"{orderId} - Long Put Hedge (Strike: {int(longPut.Strike)})", longValue)
+            
