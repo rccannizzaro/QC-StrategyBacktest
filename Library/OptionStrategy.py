@@ -15,124 +15,18 @@
 import re
 import numpy as np
 from Logger import *
-from BSMLibrary import *
-from StrategyBuilder import *
+from OptionStrategyOrder import *
 
-class OptionStrategy:
-
-   # Internal counter for all the orders
-   orderCount = 0
-
-   # Default parameters
-   defaultParameters = {
-      "creditStrategy": True
-      , "maxOrderQuantity": 1
-      , "slippage": 0.0
-      , "profitTarget": 0.6
-      , "stopLossMultiplier": 1.5
-      , "dte": 45
-      , "dteThreshold": 21
-      , "forceDteThreshold": False
-      # Credit Targeting: either using a fixed credit amount (targetPremium) or a dynamic credit (percentage of Net Liquidity)
-      , "targetPremiumPct": None
-      , "targetPremium": None
-      # Limit Order Management
-      , "useLimitOrders": True
-      , "limitOrderRelativePriceAdjustment": 0
-      , "limitOrderAbsolutePrice": None
-      , "limitOrderExpiration": timedelta(hours = 8)
-      # Delta and Wing size used for Naked Put/Call and Spreads
-      , "delta": 10
-      , "wingSize": 10
-      # Put/Call delta for Iron Condor
-      , "putDelta": 10
-      , "callDelta": 10
-      # Net delta for Straddle, Iron Fly and Butterfly (using ATM strike if netDelta = None)
-      , "netDelta": None
-      # Put/Call Wing size for Iron Condor, Iron Fly
-      , "putWingSize": 10
-      , "callWingSize": 10
-      # Butterfly specific parameters
-      , "butteflyType": None
-      , "butterflyLeftWingSize": 10
-      , "butterflyRightWingSize": 10
-      # If True, the order is submitted as long as it does not exceed the maxOrderQuantity.
-      , "validateQuantity": True
-      # If True, the order mid-price is validated to make sure the Bid-Ask spread is not too wide.
-      , "validateBidAskSpread": False
-      # Used when validateBidAskSpread = True. if the ratio between the bid-ask spread and the mid-price is higher than this parameter, the order is not executed
-      , "bidAskSpreadRatio": 0.3
-      # The time (on expiration day) at which any position that is still open will closed
-      , "marketCloseCutoffTime": time(15, 45, 0)
-      # Controls whether to include Cancelled orders (Limit orders that didn't fill) in the final output
-      , "includeCancelledOrders": True
-   }
-
-   @staticmethod
-   def getNextOrderId():
-      OptionStrategy.orderCount += 1
-      return OptionStrategy.orderCount
-
-
-   # \param[in] context is a reference to the QCAlgorithm instance. The following attributes are used from the context:
-   #    - slippage: (Optional) controls how the mid-price of an order is adjusted to include slippage.
-   #    - targetPremium: (Optional) used to determine how many contracts to buy/sell.  
-   #    - maxOrderQuantity: (Optional) Caps the number of contracts that are bought/sold (Default: 1). 
-   #         If targetPremium == None  -> This is the number of contracts bought/sold.
-   #         If targetPremium != None  -> The order is executed only if the number of contracts required to reach the target credit/debit does not exceed the maxOrderQuantity
-   def __init__(self, context, name = None, **kwargs):
-      # Set the context (QCAlgorithm object)
-      self.context = context
-      # Set default name (use the class name) if no value has been provided 
-      name = name or type(self).__name__
-      # Set the Strategy Name
-      self.name = name
-      # Set the logger
-      self.logger = Logger(context, className = type(self).__name__, logLevel = context.logLevel)
-      # Initialize the BSM pricing model
-      self.bsm = BSM(context)
-      # Initialize the Strategy Builder
-      self.strategyBuilder = StrategyBuilder(context)
-
-      # Initialize the parameters dictionary with the default values
-      self.parameters = OptionStrategy.defaultParameters.copy()
-      # Override default parameters with values that might have been set in the context
-      for key in self.parameters:
-         if hasattr(context, key):
-            self.parameters[key] = getattr(context, key)
-      # Now merge the dictionary with any kwargs parameters that might have been specified directly with the constructor (kwargs takes precedence)
-      self.parameters.update(kwargs)
-
-      # Create dictionary to keep track of all the open positions related to this strategy
-      self.openPositions = {}
-      # Create dictionary to keep track of all the working orders
-      self.workingOrders = {}
-      # Create dictionary to keep track of all the limit orders
-      self.limitOrders = {}
-
-
-   # Interface method. Must be implemented by the inheriting class
-   def setupCharts(self):
-      pass
-      
-   # Interface method. Must be implemented by the inheriting class
-   def updateCharts(self):
-      pass
-      
-   # Interface method. Must be implemented by the inheriting class
-   def getOrder(self, chain):
-      pass
-
+class OptionStrategy(OptionStrategyOrder):
 
    def run(self, chain, expiryList = None):
       if expiryList == None:
          # List of expiry dates, sorted in reverse order
          expiryList = sorted(set([contract.Expiry for contract in chain]), reverse = True)
-
-      # Log the list of expiration dates found in the chain
-      self.logger.trace("Expiration dates in the chain:")
-      for expiry in expiryList:
-         self.logger.trace(f" -> {expiry}")
+         # Log the list of expiration dates found in the chain
+         self.logger.debug("Expiration dates in the chain:")
+         for expiry in expiryList:
+            self.logger.debug(f" -> {expiry}")
 
       # Get the furthest expiry date
       expiry = expiryList[0]
@@ -165,202 +59,6 @@ class OptionStrategy:
       # Return the filtered contracts
       return filteredChain
 
-   def getMaxOrderQuantity(self):
-      # Get the context
-      context = self.context
-      # Get the strategy parameters
-      parameters = self.parameters
-      
-      # Get the maximum order quantity parameter
-      maxOrderQuantity = parameters["maxOrderQuantity"]
-      # Get the targetPremiumPct
-      targetPremiumPct = parameters["targetPremiumPct"]
-      # Check if we are using dynamic premium targeting
-      if targetPremiumPct != None:
-         # Scale the maxOrderQuantity consistently with the portfolio growth
-         maxOrderQuantity = round(maxOrderQuantity * (1 + context.Portfolio.TotalProfit / context.initialAccountValue))
-         # Make sure we don't go below the initial parameter value
-         maxOrderQuantity = max(parameters["maxOrderQuantity"], maxOrderQuantity)
-      # Return the result   
-      return maxOrderQuantity
-
-   # Create dictionary with the details of the order to be submitted
-   def getOrderDetails(self, contracts, sides, strategy, sell = True, strategyId = None, expiry = None):
-
-      # Exit if there are no contracts to process
-      if contracts == None or len(contracts) == 0:
-         return
-
-      # Get the context
-      context = self.context
-      # Get the strategy parameters
-      parameters = self.parameters
-
-      # Set the Strategy Id (if not specified)
-      strategyId = strategyId or strategy.replace(" ", "")
-
-      # Get the Expiration from the first contract (unless otherwise specified
-      expiry = expiry or contracts[0].Expiry
-      # Dictionary: maps each contract to the the side (short/long) 
-      contractSide = {}
-      # Dictionary to keep track of all the strikes, Delta and IV
-      strikes = {}
-      deltas = {}
-      IVs = {}
-
-      # Compute the Mid-Price and Bid-Ask spread for the full order
-      orderMidPrice = 0.0
-      bidAskSpread = 0.0
-      # Get the slippage parameter (if available)
-      slippage = parameters["slippage"] or 0.0
-         
-      # Get the limitOrderRelativePriceAdjustment
-      limitOrderRelativePriceAdjustment = parameters["limitOrderRelativePriceAdjustment"] or 0.0
-      # Get the limitOrderAbsolutePrice 
-      limitOrderAbsolutePrice = parameters["limitOrderAbsolutePrice"]
-
-
-      # Get the maximum order quantity
-      maxOrderQuantity = self.getMaxOrderQuantity()
-      # Get the targetPremiumPct
-      targetPremiumPct = parameters["targetPremiumPct"]
-      # Check if we are using dynamic premium targeting
-      if targetPremiumPct != None:
-         # Make sure targetPremiumPct is bounded to the range [0, 1])
-         targetPremiumPct = max(0.0, min(1.0, targetPremiumPct))
-         # Compute the target premium as a percentage of the total net portfolio value
-         targetPremium = context.Portfolio.TotalPortfolioValue * targetPremiumPct
-      else:
-         targetPremium = parameters["targetPremium"]
-
-      n = 0
-      for contract in contracts:
-         # Contract Side: +n -> Long, -n -> Short
-         orderSide = sides[n]
-         # Store it in the dictionary
-         contractSide[contract.Symbol] = orderSide
-         # Determine the prefix: Long/Short
-         if sides[n] < 0:
-            prefix = "short"
-         else:
-            prefix = "long"
-         # Determine the type: Call/Put
-         if contract.Right == OptionRight.Call:
-            type = "Call"
-         else:
-            type = "Put"
-         # Set the strike in the dictionary -> "<short|long><Call|Put>":<strike>
-         strikes[f"{prefix}{type}"] = contract.Strike
-         deltas[f"{prefix}{type}"] = contract.BSMGreeks.Delta
-         IVs[f"{prefix}{type}"] = contract.BSMImpliedVolatility
-
-         # Get the latest mid-price
-         midPrice = self.midPrice(contract)
-         # Compute the bid-ask spread
-         bidAskSpread += self.bidAskSpread(contract)         
-         # Adjusted mid-price (include slippage). Take the sign of orderSide to determine the direction of the adjustment
-         adjustedMidPrice = midPrice + np.sign(orderSide) * slippage
-         # Keep track of the total credit/debit or the order
-         orderMidPrice -= orderSide * midPrice
-
-         # Increment counter
-         n += 1
-
-      # Exit if the order mid-price is zero
-      if abs(orderMidPrice) < 1e-5:
-         return
-         
-      # Compute Limit Order price
-      if limitOrderAbsolutePrice != None:
-         # Compute the relative price adjustment (needed to adjust each leg with the same proportion)
-         limitOrderRelativePriceAdjustment = limitOrderAbsolutePrice / orderMidPrice - 1
-         # Use the specified absolute price
-         limitOrderPrice = limitOrderAbsolutePrice
-      else:
-         # Set the Limit Order price (including slippage)
-         limitOrderPrice = orderMidPrice * (1 + limitOrderRelativePriceAdjustment)
-
-      # Compute the total slippage
-      totalSlippage = sum(list(map(abs, sides))) * slippage
-      # Add slippage to the limit order
-      limitOrderPrice -= totalSlippage
-
-      # Round the prices to the nearest cent
-      orderMidPrice = round(orderMidPrice, 2)
-      limitOrderPrice = round(limitOrderPrice, 2)
-
-      # Determine which price is used to compute the order quantity
-      if parameters["useLimitOrders"]:
-         # Use the Limit Order price
-         qtyMidPrice = limitOrderPrice
-      else:
-         # Use the contract mid-price
-         qtyMidPrice = orderMidPrice
-
-      # Exit if the price is zero
-      if abs(qtyMidPrice) <= 1e-5:
-         return
-      
-
-      if targetPremium == None:
-         # No target premium was provided. Use maxOrderQuantity
-         orderQuantity = maxOrderQuantity
-      else:   
-         # Make sure we are not exceeding the available portfolio margin
-         targetPremium = min(context.Portfolio.MarginRemaining, targetPremium)
-
-         # Determine the order quantity based on the target premium
-         orderQuantity = abs(targetPremium / (qtyMidPrice * 100))
-         
-         # Different logic for Credit vs Debit strategies
-         if sell: # Credit order
-            # Sell at least one contract
-            orderQuantity = max(1, round(orderQuantity))
-         else: # Debit order
-            # make sure the total price does not exceed the target premium
-            orderQuantity = math.floor(orderQuantity)
-
-      # Create order details
-      order = {"expiry": expiry
-               , "expiryStr": expiry.strftime("%Y-%m-%d")
-               , "strategyId": strategyId
-               , "strategy": strategy
-               , "contractSide": contractSide
-               , "strikes": strikes
-               , "deltas": deltas
-               , "IVs": IVs
-               , "contracts": contracts
-               , "targetPremium": targetPremium
-               , "maxOrderQuantity": maxOrderQuantity
-               , "orderQuantity": orderQuantity
-               , "creditStrategy": sell
-               , "maxLoss": self.computeOrderMaxLoss(contracts, sides)
-               , "open": {"orders": []
-                          , "fills": 0
-                          , "filled": False
-                          , "stalePrice": False
-                          , "limitOrderAdjustment": limitOrderRelativePriceAdjustment
-                          , "orderMidPrice": orderMidPrice
-                          , "limitOrderPrice": limitOrderPrice
-                          , "qtyMidPrice": qtyMidPrice
-                          , "limitOrder": parameters["useLimitOrders"]
-                          , "limitOrderExpiryDttm": context.Time + parameters["limitOrderExpiration"]
-                          , "slippage": slippage
-                          , "totalSlippage": totalSlippage
-                          , "bidAskSpread": bidAskSpread
-                          , "fillPrice": 0.0
-                          }
-               , "close": {"orders": []
-                           , "fills": 0
-                           , "filled": False
-                           , "stalePrice": False
-                           , "orderMidPrice": 0.0
-                           , "fillPrice": 0.0
-                           }
-            }
-
-      return order
-
 
    # Open a position based on the order details (as returned by getOrderDetails)
    def openPosition(self, order):
@@ -382,6 +80,9 @@ class OptionStrategy:
 
       useLimitOrders = parameters["useLimitOrders"]
       useMarketOrders = not useLimitOrders
+      
+      # Get the EMA memory
+      emaMemory = parameters["emaMemory"]
 
       # Current timestamp
       currentDttm = self.context.Time
@@ -389,8 +90,9 @@ class OptionStrategy:
       # Extract order details. More readable than navigating the order dictionary..
       strategyId = order["strategyId"]
       contractSide = order["contractSide"]
+      sidesDesc = order["sidesDesc"]
+      midPrices = order["midPrices"]
       strikes = order["strikes"]
-      deltas = order["deltas"]
       IVs = order["IVs"]
       expiry = order["expiry"]
       targetPremium = order["targetPremium"]
@@ -432,6 +134,7 @@ class OptionStrategy:
 
       # Position dictionary. Used to keep track of the position and to report the results (will be converted into a flat csv)
       position = {"orderId"                 : orderId
+                  , "orderTag"              : orderTag
                   , "expiryStr"             : expiryStr
                   , "openDttm"              : currentDttm
                   , "openDt"                : currentDttm.strftime("%Y-%m-%d")
@@ -461,15 +164,48 @@ class OptionStrategy:
                   , "openStalePrice"        : False
                   , "closeStalePrice"       : False
                   , "orderCancelled"        : False
+                  , "statsUpdateCount"      : 1.0
                   }
 
-      # Add details about strikes, Delta and IV of each contract in the order
-      for key in strikes:
+      # Using separate loops here so that the final CSV file has the columns in the desired order
+      # Add details about strikes of each contract in the order
+      for key in sidesDesc:
          position[f"{self.name}.{key}.Strike"] = strikes[key]
-      for key in strikes:
-         position[f"{self.name}.{key}.Delta"] = deltas[key]
-      for key in strikes:
+
+      # Add details about the mid price, fill price and related stats 
+      for key in sidesDesc:
+         position[f"{self.name}.{key}.openFillPrice"] = float("NaN")
+         position[f"{self.name}.{key}.closeFillPrice"] = float("NaN")
+         position[f"{self.name}.{key}.midPrice"] = midPrices[key]
+         if parameters["includeLegDetails"]:
+            position[f"{self.name}.{key}.midPrice.Min"] = midPrices[key]
+            position[f"{self.name}.{key}.midPrice.Avg"] = midPrices[key]
+            position[f"{self.name}.{key}.midPrice.Max"] = midPrices[key]
+            position[f"{self.name}.{key}.midPrice.EMA({emaMemory})"] = midPrices[key]
+            position[f"{self.name}.{key}.PnL"] = 0.0
+            position[f"{self.name}.{key}.PnL.Min"] = 0.0
+            position[f"{self.name}.{key}.PnL.Avg"] = 0.0
+            position[f"{self.name}.{key}.PnL.Max"] = 0.0
+            position[f"{self.name}.{key}.PnL.EMA({emaMemory})"] = 0.0
+      
+      # Add details about the greeks, and create placeholders to keep track of their range (Min, Avg, Max)
+      for greek in ["delta", "gamma", "vega", "theta"]:
+         for key in sidesDesc:
+            position[f"{self.name}.{key}.{greek.title()}"] = order[f"{greek}s"][key]
+            if parameters["includeLegDetails"]:
+               position[f"{self.name}.{key}.{greek.title()}.Min"] = order[f"{greek}s"][key]
+               position[f"{self.name}.{key}.{greek.title()}.Avg"] = order[f"{greek}s"][key]
+               position[f"{self.name}.{key}.{greek.title()}.Max"] = order[f"{greek}s"][key]
+               position[f"{self.name}.{key}.{greek.title()}.EMA({emaMemory})"] = order[f"{greek}s"][key]
+            
+       # Add details about the IV 
+      for key in sidesDesc:
          position[f"{self.name}.{key}.IV"] = IVs[key]
+         if parameters["includeLegDetails"]:
+            position[f"{self.name}.{key}.IV.Min"] = IVs[key]
+            position[f"{self.name}.{key}.IV.Avg"] = IVs[key]
+            position[f"{self.name}.{key}.IV.Max"] = IVs[key]
+            position[f"{self.name}.{key}.IV.EMA({emaMemory})"] = IVs[key]
 
       # Add this position to the global dictionary
       context.allPositions[orderId] = position
@@ -540,7 +276,7 @@ class OptionStrategy:
          # Sign of the transaction: open -> -1,  close -> +1
          transactionSign = -orderSign
          # Get the mid price of each contract
-         prices = np.array(list(map(self.latestMidPrice, contracts)))
+         prices = np.array(list(map(self.midPrice, contracts)))
          # Get the order sides
          orderSides = np.array(limitOrder["orderSides"])
          # Total slippage
@@ -548,7 +284,7 @@ class OptionStrategy:
          # Compute the total order price (including slippage)
          midPrice = transactionSign * sum(orderSides * prices) - totalSlippage
          # Compute Bid-Ask spread
-         bidAskSpread = sum(list(map(self.latestBidAskSpread, contracts)))
+         bidAskSpread = sum(list(map(self.bidAskSpread, contracts)))
          # Keep track of the Limit order mid-price range
          position[f"{orderType}OrderMidPrice.Min"] = min(position[f"{orderType}OrderMidPrice.Min"], midPrice)
          position[f"{orderType}OrderMidPrice.Max"] = max(position[f"{orderType}OrderMidPrice.Max"], midPrice)
@@ -584,13 +320,81 @@ class OptionStrategy:
             self.limitOrders.pop(orderTag)
 
 
-   def OnOrderEvent(self, orderEvent):
-
-      # Log the order event
-      self.logger.debug(orderEvent)
-
+   def updateContractStats(self, bookPosition, openPosition, contract, orderType = None, fillPrice = None):
+   
       # Get the context
       context = self.context
+      # Get the strategy parameters
+      parameters = self.parameters
+      
+      # Get the side of the contract at the time of opening: -1 -> Short   +1 -> Long
+      contractSide = openPosition["contractSide"][contract.Symbol]
+      contractSideDesc = openPosition["contractSideDesc"][contract.Symbol]
+      
+      # Set the prefix used to identify each field to be updated
+      fieldPrefix = f"{self.name}.{contractSideDesc}"
+
+      # Store the Open/Close Fill Price (if specified)
+      if orderType != None:
+         bookPosition[f"{fieldPrefix}.{orderType}FillPrice"] = fillPrice
+
+      # Exit if we don't need to include the details
+      if not parameters["includeLegDetails"] or context.Time.minute % parameters["legDatailsUpdateFrequency"] != 0:
+         return
+         
+      # Get the EMA memory factor
+      emaMemory = parameters["emaMemory"]
+      # Compute the decay such that the contribution of each new value drops to 5% after emaMemory iterations
+      emaDecay = 0.05**(1.0/emaMemory)
+      
+      # Update the counter (used for the average)
+      bookPosition["statsUpdateCount"] += 1
+      statsUpdateCount = bookPosition["statsUpdateCount"]
+            
+      # Compute the mid-price of the contract
+      midPrice = self.midPrice(contract)
+
+      # Compute the Greeks (retrieve it as a dictionary)
+      greeks = self.bsm.computeGreeks(contract).__dict__
+      # Add the midPrice and PnL values to the greeks dictionary to generalize the processing loop
+      greeks["midPrice"] = self.midPrice(contract)
+      
+      # List of variables for which we are going to update the stats
+      vars = ["midPrice", "Delta", "Gamma", "Vega", "Theta", "IV"]
+      
+      # Get the fill price at the open
+      openFillPrice = bookPosition[f"{fieldPrefix}.openFillPrice"]
+      # Check if the fill price is set 
+      if not math.isnan(openFillPrice):
+         # Compute the PnL of the contract (100 shares per contract)
+         PnL = 100 * (openFillPrice + midPrice * contractSide)
+         # Add the PnL to the list of variables for which we want to update the stats
+         vars.append("PnL")         
+         greeks["PnL"] = PnL
+      
+      for var in vars:
+         # Set the name of the field to be updated
+         fieldName = f"{fieldPrefix}.{var}"
+         # Get the latest value from the dictionary
+         fieldValue = greeks[var]
+         # Special case for the PnL
+         if var == "PnL":
+            # Update the PnL value
+            bookPosition[f"{fieldName}"] = fieldValue
+            # Initialize the EMA for the PnL
+            if statsUpdateCount == 2:
+               bookPosition[f"{fieldName}.EMA({emaMemory})"] = fieldValue
+         # Update the Min field
+         bookPosition[f"{fieldName}.Min"] = min(bookPosition[f"{fieldName}.Min"], fieldValue)
+         # Update the Max field
+         bookPosition[f"{fieldName}.Max"] = max(bookPosition[f"{fieldName}.Max"], fieldValue)
+         # Update the EMA field (IMPORTANT: this must be done before we update the Avg field!)
+         bookPosition[f"{fieldName}.EMA({emaMemory})"] = emaDecay * bookPosition[f"{fieldName}.EMA({emaMemory})"] + (1-emaDecay)*fieldValue
+         # Update the Avg field
+         bookPosition[f"{fieldName}.Avg"] = (bookPosition[f"{fieldName}.Avg"]*(statsUpdateCount-1) + fieldValue)/statsUpdateCount
+     
+
+   def OnOrderEvent(self, orderEvent):
 
       # Process only Fill events 
       if not (orderEvent.Status == OrderStatus.Filled or orderEvent.Status == OrderStatus.PartiallyFilled):
@@ -599,7 +403,10 @@ class OptionStrategy:
       if(orderEvent.IsAssignment):
          # TODO: Liquidate the assigned position. 
          #  Eventually figure out which open position it belongs to and close that position.
-         pass
+         return
+
+      # Get the context
+      context = self.context
 
       # Get the orderEvent id
       orderEventId = orderEvent.OrderId
@@ -608,15 +415,24 @@ class OptionStrategy:
       # Get the order tag. Remove any warning text that might have been added in case of Fills at Stale Price
       orderTag = re.sub(" - Warning.*", "", order.Tag)
 
-      # Exit if this order tag is not in the list of open orders. (Check for orderTag = None -> assignments have no order tag)
-      if orderTag == None or orderTag not in self.workingOrders:
+      # Get the woring order (if available)
+      workingOrder = self.workingOrders.get(orderTag)
+      # Exit if this order tag is not in the list of open orders.
+      if workingOrder == None:
          return
 
-      contractInfo = self.workingOrders[orderTag][orderEvent.Symbol]
+      contractInfo = workingOrder.get(orderEvent.Symbol)
+      # Exit if we couldn't find the contract info.
+      if contractInfo == None:
+         return
+
       # Get the order id and expiryStr value for the contract
       orderId = contractInfo["orderId"]
       expiryStr = contractInfo["expiryStr"]
       orderType = contractInfo["orderType"]
+
+      # Log the order event
+      self.logger.debug(f" -> Processing order id {orderId} (orderTag: {orderTag}  -  orderType: {orderType}  -  Expiry: {expiryStr})")
 
       # Exit if this expiry date is not in the list of open positions
       if expiryStr not in self.openPositions:
@@ -624,20 +440,27 @@ class OptionStrategy:
 
       # Retrieve the open position
       openPosition = self.openPositions[expiryStr]
+      # Retrieved the book position (this it the full entry inside allPositions that will be converted into a CSV record)
+      bookPosition = context.allPositions[orderId]
+      
+      # Get the contract associated to this order event
+      contract = openPosition["contractDictionary"][orderEvent.Symbol]
+      # Get the description associated with this contract
+      contractDesc = openPosition["contractSideDesc"][orderEvent.Symbol]
       # Get the quantity used to open the position
       positionQuantity = openPosition["orderQuantity"]
       # Get the side of each leg (-n -> Short, +n -> Long)
-      contractSides = openPosition["contractSide"].values()
+      contractSides = np.array(openPosition["sides"])
       # Leg Quantity
       legQuantity = abs(openPosition["contractSide"][orderEvent.Symbol])
       # Total legs quantity in the whole position
-      Nlegs = sum(list(map(abs,contractSides)))
+      Nlegs = sum(abs(contractSides))
 
       # Check if the contract was filled at a stale price (Warnings in the orderTag)
       if re.search(" - Warning.*", order.Tag):
          self.logger.warning(order.Tag)
          openPosition[orderType]["stalePrice"] = True
-         context.allPositions[orderId][f"{orderType}StalePrice"] = True
+         bookPosition[f"{orderType}StalePrice"] = True
 
       # Add the order to the list of openPositions orders (only if this is the first time the order is filled  - in case of partial fills)
       if contractInfo["fills"] == 0:
@@ -649,6 +472,8 @@ class OptionStrategy:
       # Remove this order entry from the self.workingOrders[orderTag] dictionary if it has been fully filled
       if contractInfo["fills"] == legQuantity * positionQuantity:
          removedOrder = self.workingOrders[orderTag].pop(orderEvent.Symbol)
+         # Update the stats of the given contract inside the bookPosition (reverse the sign of the FillQuantity: Sell -> credit, Buy -> debit)
+         self.updateContractStats(bookPosition, openPosition, contract, orderType = orderType, fillPrice = - np.sign(orderEvent.FillQuantity) * orderEvent.FillPrice)
 
       # Update the counter of positions that have been filled
       openPosition[orderType]["fills"] += abs(orderEvent.FillQuantity)
@@ -657,34 +482,35 @@ class OptionStrategy:
       # Check if this is a fill order for an entry position
       if orderType == "open":
          # Update the openPremium field to include the current transaction (use "-=" to reverse the side of the transaction: Short -> credit, Long -> debit)
-         context.allPositions[orderId]["openPremium"] -= transactionAmt
+         bookPosition["openPremium"] -= transactionAmt
       else: # This is an order for the exit position
          # Update the closePremium field to include the current transaction  (use "-=" to reverse the side of the transaction: Sell -> credit, Buy -> debit)
-         context.allPositions[orderId]["closePremium"] -= transactionAmt
+         bookPosition["closePremium"] -= transactionAmt
 
       # Check if all legs have been filled
       if openPosition[orderType]["fills"] == Nlegs*positionQuantity:
          openPosition[orderType]["filled"] = True
          # Set the time when the full order was filled
-         context.allPositions[orderId][orderType + "FilledDttm"] = context.Time
+         bookPosition[orderType + "FilledDttm"] = context.Time
          # Record the order mid price
-         context.allPositions[orderId][orderType + "OrderMidPrice"] = openPosition[orderType]["orderMidPrice"]
+         bookPosition[orderType + "OrderMidPrice"] = openPosition[orderType]["orderMidPrice"]
+         
          if orderType == "open":
             # Trigger an update of the charts
             context.statsUpdated = True
             # Increment the counter of active positions
             context.currentActivePositions += 1
             # Store the credit received (needed to determine the stop loss): value is per share (divided by 100)
-            openPosition[orderType]["premium"] = context.allPositions[orderId]["openPremium"] / 100
+            openPosition[orderType]["premium"] = bookPosition["openPremium"] / 100
 
       # Check if the entire position has been closed
       if orderType == "close" and openPosition["open"]["filled"] and openPosition["close"]["filled"]:
 
          # Compute P&L for the position
-         positionPnL = context.allPositions[orderId]["openPremium"] + context.allPositions[orderId]["closePremium"]
+         positionPnL = bookPosition["openPremium"] + bookPosition["closePremium"]
 
          # Store the PnL for the position
-         context.allPositions[orderId]["P&L"] = positionPnL
+         bookPosition["P&L"] = positionPnL
          # Now we can remove the position from the self.openPositions dictionary
          removedPosition = self.openPositions.pop(expiryStr)
          # Decrement the counter of active positions
@@ -737,24 +563,28 @@ class OptionStrategy:
             strikes = closedPosition["strikes"]
             shortPutStrike = 0
             shortCallStrike = float('inf')
+            updateFlg = False
             # Get the short strikes (if any)
             if("shortPut" in strikes):
+               updateFlg = True
                shortPutStrike = strikes["shortPut"]
             if("shortCall" in strikes):
+               updateFlg = True
                shortCallStrike = strikes["shortCall"]
 
-            # Check if the short Put is in the money
-            if priceAtClose <= shortPutStrike:
-               context.stats.testedPut += 1
-            # Check if the short Call is in the money
-            elif priceAtClose >= shortCallStrike:
-               context.stats.testedCall += 1
-            # Check if the short Put is being tested
-            elif (priceAtClose-shortPutStrike) < (shortCallStrike - priceAtClose):
-               context.stats.testedPut += 1
-            # The short Call is being tested
-            else:
-               context.stats.testedCall += 1
+            if updateFlg:
+               # Check if the short Put is in the money
+               if priceAtClose <= shortPutStrike:
+                  context.stats.testedPut += 1
+               # Check if the short Call is in the money
+               elif priceAtClose >= shortCallStrike:
+                  context.stats.testedCall += 1
+               # Check if the short Put is being tested
+               elif (priceAtClose-shortPutStrike) < (shortCallStrike - priceAtClose):
+                  context.stats.testedPut += 1
+               # The short Call is being tested
+               else:
+                  context.stats.testedCall += 1
 
       # Update the Win Rate
       if ((context.stats.won + context.stats.lost) > 0):
@@ -1021,9 +851,15 @@ class OptionStrategy:
                # Check if we've hit the stop loss threshold
                stopLossFlg = netMaxLoss <= positionPnL <= stopLoss
 
+               bookPosition = context.allPositions[orderId]
                # Keep track of the P&L range throughout the life of the position
-               context.allPositions[orderId]["P&L.Min"] = min(context.allPositions[orderId]["P&L.Min"], 100*positionPnL)
-               context.allPositions[orderId]["P&L.Max"] = max(context.allPositions[orderId]["P&L.Max"], 100*positionPnL)
+               bookPosition["P&L.Min"] = min(bookPosition["P&L.Min"], 100*positionPnL)
+               bookPosition["P&L.Max"] = max(bookPosition["P&L.Max"], 100*positionPnL)
+               
+               # Update the stats of each contract
+               if parameters["includeLegDetails"] and context.Time.minute % parameters["legDatailsUpdateFrequency"] == 0:
+                  for contract in position["contracts"]:
+                     self.updateContractStats(bookPosition, position, contract)
 
                # Check if we need to close the position
                if (positionPnL >= targetProfit # We hit the profit target
@@ -1065,323 +901,3 @@ class OptionStrategy:
             ### No fills at all
          ### The open position has not been fully filled (this must be a Limit order)
 
-
-   # Returns the latest mid-price of an option contract
-   def latestMidPrice(self, contract):
-      return self.midPrice(self.context.Securities[contract.Symbol])
-
-   def latestBidAskSpread(self, contract):
-      return self.bidAskSpread(self.context.Securities[contract.Symbol])
-      
-   # Returns the mid-price of an option contract
-   def midPrice(self, contract):
-      return 0.5*(contract.BidPrice + contract.AskPrice)
-
-
-   # Returns the mid-price of an option contract
-   def bidAskSpread(self, contract):
-      return abs(contract.AskPrice - contract.BidPrice)
-
-
-   def getPayoff(self, spotPrice, contracts, sides):
-      # Exit if there are no contracts to process
-      if len(contracts) == 0:
-         return 0
-
-      # Initialize the counter
-      n = 0
-      # initialize the payoff
-      payoff = 0
-      for contract in contracts:
-         # direction: Call -> +1, Put -> -1
-         direction = 2*int(contract.Right == OptionRight.Call)-1
-         # Add the payoff of the current contract
-         payoff += sides[n] * max(0, direction * (spotPrice - contract.Strike))
-         # Increment the counter
-         n += 1
-
-      # Return the payoff
-      return payoff
-
-
-   def computeOrderMaxLoss(self, contracts, sides):
-      # Exit if there are no contracts to process
-      if len(contracts) == 0:
-         return 0
-
-      # Get the current price of the underlying
-      UnderlyingLastPrice = contracts[0].UnderlyingLastPrice
-      # Evaluate the payoff at the extreme (spotPrice = 0)
-      maxLoss = self.getPayoff(0, contracts, sides)
-      # Evaluate the payoff at each strike
-      for contract in contracts:
-         maxLoss = min(maxLoss, self.getPayoff(contract.Strike, contracts, sides))
-
-      # Evaluate the payoff at the extreme (spotPrice = 10x higher)
-      maxLoss = min(maxLoss, self.getPayoff(UnderlyingLastPrice*10, contracts, sides))      
-      # Cap the payoff at zero: we are only interested in losses
-      maxLoss = min(0, maxLoss)
-      # Return the max loss
-      return maxLoss
-
-
-   def getNakedOrder(self, contracts, type, strike = None, delta = None, fromPrice = None, toPrice = None, sell = True):
-      if sell:
-         # Short option contract
-         sides = [-1]
-         strategy = f"Short {type.title()}"
-      else:
-         # Long option contract
-         sides = [1]
-         strategy = f"Long {type.title()}"
-
-      type = type.lower()
-      if type == "put":
-         # Get all Puts with a strike lower than the given strike and delta lower than the given delta
-         sorted_contracts = self.strategyBuilder.getPuts(contracts, toDelta = delta, toStrike = strike, fromPrice = fromPrice, toPrice = toPrice)
-      elif type == "call":
-         # Get all Calls with a strike higher than the given strike and delta lower than the given delta
-         sorted_contracts = self.strategyBuilder.getCalls(contracts, toDelta = delta, fromStrike = strike, fromPrice = fromPrice, toPrice = toPrice)
-      else:
-         self.logger.error(f"Input parameter type = {type} is invalid. Valid values: Put|Call.")
-         return
-
-      # Check if we got any contracts
-      if len(sorted_contracts):
-         # Create order details
-         order = self.getOrderDetails([sorted_contracts[0]], sides, strategy, sell)
-         # Return the order
-         return order
-
-
-   # Create order details for a Straddle order
-   def getStraddleOrder(self, contracts, strike = None, netDelta = None, sell = True):
-
-      if sell:
-         # Short Straddle
-         sides = [-1, -1]
-      else:
-         # Long Straddle
-         sides = [1, 1]
-
-      # Delta strike selection (in case the Iron Fly is not centered on the ATM strike)
-      delta = None
-      # Make sure the netDelta is less than 50 
-      if netDelta != None and abs(netDelta) < 50:
-         delta = 50 + netDelta 
-
-      if strike == None and delta == None:
-         # Standard Straddle: get the ATM contracts
-         legs = self.strategyBuilder.getATM(contracts)
-      else:
-         legs = []
-         # This is a Straddle centered at the given strike or Net Delta.          
-         # Get the Put at the requested delta or strike
-         puts = self.strategyBuilder.getPuts(contracts, toDelta = delta, toStrike = strike)
-         if(len(puts) > 0):
-            put = puts[0]
-
-            # Get the Call at the same strike as the Put
-            calls = self.strategyBuilder.getCalls(contracts, fromStrike = put.Strike)
-            if(len(calls) > 0):
-               call = calls[0]
-               # Collect both legs
-               legs = [put, call]
-
-      # Create order details
-      order = self.getOrderDetails(legs, sides, "Straddle", sell)
-      # Return the order
-      return order
-
-
-   # Create order details for a Strangle order
-   def getStrangleOrder(self, contracts, callDelta = None, putDelta = None, callStrike = None, putStrike = None, sell = True):
-
-      if sell:
-         # Short Strangle
-         sides = [-1, -1]
-      else:
-         # Long Strangle
-         sides = [1, 1]
-
-      # Get all Puts with a strike lower than the given putStrike and delta lower than the given putDelta
-      puts = self.strategyBuilder.getPuts(contracts, toDelta = putDelta, toStrike = putStrike)
-      # Get all Calls with a strike higher than the given callStrike and delta lower than the given callDelta
-      calls = self.strategyBuilder.getCalls(contracts, toDelta = callDelta, fromStrike = callStrike)
-
-      # Get the two contracts
-      legs = []
-      if len(puts) > 0 and len(calls) > 0:
-         legs = [puts[0], calls[0]]
-
-      # Create order details
-      order = self.getOrderDetails(legs, sides, "Strangle", sell)
-      # Return the order
-      return order
-
-
-   def getSpreadOrder(self, contracts, type, strike = None, delta = None, wingSize = None, sell = True):
-
-      if sell:
-         # Credit Spread
-         sides = [-1, 1]
-         strategy = f"{type.title()} Credit Spread"
-      else:
-         # Debit Spread
-         sides = [1, -1]
-         strategy = f"{type.title()} Debit Spread"
-
-      # Get the legs of the spread
-      legs = self.strategyBuilder.getSpread(contracts, type, strike = strike, delta = delta, wingSize = wingSize)
-
-      # Exit if we couldn't get both legs of the spread
-      if len(legs) != 2:
-         return
-
-      # Create order details
-      order = self.getOrderDetails(legs, sides, strategy, sell)
-      # Return the order
-      return order
-
-
-   def getIronCondorOrder(self, contracts, callDelta = None, putDelta = None, callStrike = None, putStrike = None, callWingSize = None, putWingSize = None, sell = True):
-
-      if sell:
-         # Sell Iron Condor: [longPut, shortPut, shortCall, longCall]
-         sides = [1, -1, -1, 1]
-         strategy = "Iron Condor"
-      else:
-         # Buy Iron Condor: [shortPut, longPut, longCall, shortCall]
-         sides = [-1, 1, 1, -1]
-         strategy = "Reverse Iron Condor"
-
-      # Get the Put spread
-      puts = self.strategyBuilder.getSpread(contracts, "Put", strike = putStrike, delta = putDelta, wingSize = putWingSize, sortByStrike = True)
-      # Get the Call spread
-      calls = self.strategyBuilder.getSpread(contracts, "Call", strike = callStrike, delta = callDelta, wingSize = callWingSize)
-
-      # Collect all legs
-      legs = puts + calls
-
-      # Exit if we couldn't get all legs of the Iron Condor
-      if len(legs) != 4:
-         return
-
-      # Create order details
-      order = self.getOrderDetails(legs, sides, strategy, sell)
-      # Return the order
-      return order
-
-
-   def getIronFlyOrder(self, contracts, netDelta = None, strike = None, callWingSize = None, putWingSize = None, sell = True):
-
-      if sell:
-         # Sell Iron Fly: [longPut, shortPut, shortCall, longCall]
-         sides = [1, -1, -1, 1]
-         strategy = "Iron Fly"
-      else:
-         # Buy Iron Fly: [shortPut, longPut, longCall, shortCall]
-         sides = [-1, 1, 1, -1]
-         strategy = "Reverse Iron Fly"
-
-      # Delta strike selection (in case the Iron Fly is not centered on the ATM strike)
-      delta = None
-      # Make sure the netDelta is less than 50 
-      if netDelta != None and abs(netDelta) < 50:
-         delta = 50 + netDelta 
-
-      if strike == None and delta == None:
-         # Standard ATM Iron Fly
-         strike = self.strategyBuilder.getATMStrike(contracts)
-
-      # Get the Put spread
-      puts = self.strategyBuilder.getSpread(contracts, "Put", strike = strike, delta = delta, wingSize = putWingSize, sortByStrike = True)      
-      # Get the Call spread with the same strike as the first leg of the Put spread
-      calls = self.strategyBuilder.getSpread(contracts, "Call", strike = puts[0].Strike, wingSize = callWingSize)
-
-      # Collect all legs
-      legs = puts + calls
-
-      # Exit if we couldn't get all legs of the Iron Fly
-      if len(legs) != 4:
-         return
-
-      # Create order details
-      order = self.getOrderDetails(legs, sides, strategy, sell)
-      # Return the order
-      return order
-
-
-   def getButterflyOrder(self, contracts, type, netDelta = None, strike = None, leftWingSize = None, rightWingSize = None, sell = False):
-
-      # Make sure the wing sizes are set
-      leftWingSize = leftWingSize or rightWingSize or 1
-      rightWingSize = rightWingSize or leftWingSize or 1
-
-      if sell:
-         # Sell Butterfly: [short<Put|Call>, 2 long<Put|Call>, short<Put|Call>]
-         sides = [-1, 2, -1]
-         strategy = "Credit Butterfly"
-      else:
-         # Buy Butterfly: [long<Put|Call>, 2 short<Put|Call>, long<Put|Call>]
-         sides = [1, -2, 1]
-         strategy = "Debit Butterfly"
-
-      # Delta strike selection (in case the Butterfly is not centered on the ATM strike)
-      delta = None
-      # Make sure the netDelta is less than 50 
-      if netDelta != None and abs(netDelta) < 50:
-         if type.lower() == "put":
-            # Use Put delta
-            delta = 50 + netDelta
-         else:
-            # Use Call delta
-            delta = 50 - netDelta
-
-      if strike == None and delta == None:
-         # Standard ATM Butterfly
-         strike = self.strategyBuilder.getATMStrike(contracts)
-
-      type = type.lower()
-      if type == "put":
-         # Get the Put spread (sorted by strike in ascending order)
-         putSpread = self.strategyBuilder.getSpread(contracts, "Put", strike = strike, delta = delta, wingSize = leftWingSize, sortByStrike = True)
-         # Exit if we couldn't get all legs of the Iron Fly
-         if len(putSpread) != 2:
-            return
-         # Get the middle strike (second entry in the list)
-         middleStrike = putSpread[1].Strike
-         # Find the right wing of the Butterfly (add a small offset to the fromStrike in order to avoid selecting the middle strike as a wing)
-         wings = self.strategyBuilder.getPuts(contracts, fromStrike = middleStrike + 0.1, toStrike = middleStrike + rightWingSize)
-         # Exit if we could not find the wing
-         if len(wings) == 0:
-            return
-         # Combine all the legs
-         legs = putSpread + wings[0]
-      elif type == "call":
-         # Get the Call spread (sorted by strike in ascending order)
-         callSpread = self.strategyBuilder.getSpread(contracts, "Call", strike = strike, delta = delta, wingSize = rightWingSize)
-         # Exit if we couldn't get all legs of the Iron Fly
-         if len(callSpread) != 2:
-            return
-         # Get the middle strike (first entry in the list)
-         middleStrike = callSpread[0].Strike
-         # Find the left wing of the Butterfly (add a small offset to the toStrike in order to avoid selecting the middle strike as a wing)
-         wings = self.strategyBuilder.getCalls(contracts, fromStrike = middleStrike - leftWingSize, toStrike = middleStrike - 0.1)
-         # Exit if we could not find the wing
-         if len(wings) == 0:
-            return
-         # Combine all the legs
-         legs = wings[0] + callSpread
-      else:
-         self.logger.error(f"Input parameter type = {type} is invalid. Valid values: Put|Call.")
-         return
-
-      # Exit if we couldn't get both legs of the spread
-      if len(legs) != 3:
-         return
-
-      # Create order details
-      order = self.getOrderDetails(legs, sides, strategy, sell)
-      # Return the order
-      return order

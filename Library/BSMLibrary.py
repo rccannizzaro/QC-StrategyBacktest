@@ -31,10 +31,10 @@ class BSM:
    def isITM(self, contract):
       if contract.Right == OptionRight.Call:
          # A Call option is in the money if the underlying price is above the strike price
-         return contract.Strike < contract.UnderlyingLastPrice
+         return contract.Strike < self.getUnderlyingLastPrice(contract)
       else:
          # A Put option is in the money if the underlying price is below the strike price
-         return contract.UnderlyingLastPrice < contract.Strike
+         return self.getUnderlyingLastPrice(contract) < contract.Strike
          
    def bsmD1(self, contract, sigma, tau = None, ir = None):
       # Get the DTE as a fraction of a year
@@ -46,7 +46,7 @@ class BSM:
          ir = self.riskFreeRate
 
       # Spot price (mid-price)
-      spotPrice = contract.UnderlyingLastPrice
+      spotPrice = self.getUnderlyingLastPrice(contract)
       # Strike price
       strikePrice = contract.Strike
       
@@ -105,7 +105,7 @@ class BSM:
          tau = self.optionTau(contract)
       
       # Spot price (mid-price)
-      spotPrice = contract.UnderlyingLastPrice
+      spotPrice = self.getUnderlyingLastPrice(contract)
       # Compute D1
       d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
       # Compute D2
@@ -130,7 +130,7 @@ class BSM:
       if tau == None:
          tau = self.optionTau(contract)
       # Spot price (mid-price)
-      spotPrice = contract.UnderlyingLastPrice
+      spotPrice = self.getUnderlyingLastPrice(contract)
       # Compute D1
       if d1 == None:
          d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
@@ -155,7 +155,7 @@ class BSM:
       if tau == None:
          tau = self.optionTau(contract)
       # Spot price (mid-price)
-      spotPrice = contract.UnderlyingLastPrice
+      spotPrice = self.getUnderlyingLastPrice(contract)
       # Compute D1
       if d1 == None:
          d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
@@ -175,7 +175,7 @@ class BSM:
    # Compute the Gamma of an option
    def bsmGamma(self, contract, sigma, tau = None, d1 = None, ir = None):
       # Spot price (mid-price)
-      spotPrice = contract.UnderlyingLastPrice
+      spotPrice = self.getUnderlyingLastPrice(contract)
       # Get the DTE as a fraction of a year
       if tau == None:
          tau = self.optionTau(contract)
@@ -194,7 +194,7 @@ class BSM:
    # Compute the Vega of an option
    def bsmVega(self, contract, sigma, tau = None, d1 = None, ir = None):
       # Spot price (mid-price)
-      spotPrice = contract.UnderlyingLastPrice
+      spotPrice = self.getUnderlyingLastPrice(contract)
       # Get the DTE as a fraction of a year
       if tau == None:
          tau = self.optionTau(contract)
@@ -212,7 +212,7 @@ class BSM:
       if tau == None:
          tau = self.optionTau(contract)
       # Spot price (mid-price)
-      spotPrice = contract.UnderlyingLastPrice
+      spotPrice = self.getUnderlyingLastPrice(contract)
       # Compute D1
       if d1 == None:
          d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
@@ -286,7 +286,7 @@ class BSM:
       ### if (sigma == None)
       
       # Spot price (mid-price)
-      spotPrice = contract.UnderlyingLastPrice
+      spotPrice = self.getUnderlyingLastPrice(contract)
       # Compute D1
       d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
       # Compute D2
@@ -314,6 +314,7 @@ class BSM:
                          , rho = rho
                          , vomma = vomma
                          , elasticity = elasticity
+                         , IV = sigma
                          )
       
       # Check if we need to save the Greeks as an attribute of the contract object
@@ -351,13 +352,37 @@ class BSM:
       
       return
    
+   def getUnderlyingLastPrice(self, contract):
+      # Get the context
+      context = self.context
+      # Get the object from the Securities dictionary if available (pull the latest price), else use the contract object itself
+      if contract.UnderlyingSymbol in context.Securities:
+         security = context.Securities[contract.UnderlyingSymbol]
+         
+      # Check if we have found the security
+      if security != None:
+         # Get the last known price of the security
+         return context.GetLastKnownPrice(security).Price
+      else:
+         # Get the UnderlyingLastPrice attribute of the contract
+         return contract.UnderlyingLastPrice
+         
    # Returns the mid-price of an option contract
    def midPrice(self, contract):
-      return 0.5*(contract.BidPrice + contract.AskPrice)
+      # Get the Securities object
+      Securities = self.context.Securities
+      # Check if we can extract the Symbol attribute
+      if hasattr(contract, "Symbol") and contract.Symbol in Securities:
+         # Get the security from the Securities dictionary if available (pull the latest price), else use the contract object itself
+         security = Securities[contract.Symbol]
+      else:
+         # Use the contract itself
+         security = contract
+      return 0.5*(security.BidPrice + security.AskPrice)
 
 
 class BSMGreeks:
-   def __init__(self, delta = None, gamma = None, vega = None, theta = None, rho = None, vomma = None, elasticity = None):
+   def __init__(self, delta = None, gamma = None, vega = None, theta = None, rho = None, vomma = None, elasticity = None, IV = None):
       self.Delta = delta
       self.Gamma = gamma
       self.Vega = vega
@@ -365,3 +390,4 @@ class BSMGreeks:
       self.Rho = rho
       self.Vomma = vomma
       self.Elasticity = elasticity
+      self.IV = IV

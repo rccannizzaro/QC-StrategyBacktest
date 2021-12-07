@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 from System.Drawing import Color
 from Strategies import *
+from Logger import *
 
 class StrategyBacktest(QCAlgorithm):
 
@@ -123,6 +124,12 @@ class StrategyBacktest(QCAlgorithm):
       #Controls whether to include Cancelled orders (Limit orders that didn't fill) in the final output
       self.includeCancelledOrders = True
 
+      # Controls whether to include details on each leg (open/close fill price and descriptive statistics about mid-price, Greeks, and IV)
+      self.includeLegDetails = False
+      # The frequency (in minutes) with which the leg details are updated (used only if includeLegDetails = True). 
+      # Updating with high frequency (i.e. every 5 minutes) will slow down the execution
+      self.legDatailsUpdateFrequency = 30
+      
       # ########################################################################
       # Trading Strategies. 
       #   - Multiple strategies can be executed at the same time
@@ -286,11 +293,17 @@ class StrategyBacktest(QCAlgorithm):
 
    def setupBacktest(self):   
       
+      # Set the logger
+      self.logger = Logger(self, className = type(self).__name__, logLevel = self.logLevel)
+      
       # Number of currently active positions
       self.currentActivePositions = 0
       
       # Initialize the dictionary to keep track of all positions
       self.allPositions = {}
+      
+      # Dictionary to keep track of all the available expiration dates at any given date
+      self.expiryList = {}
       
       # Add the underlying
       if self.ticker in ["SPX", "VIX"]:
@@ -459,16 +472,32 @@ class StrategyBacktest(QCAlgorithm):
 
       # Exit if we got no chains
       if chain == None:
-         #self.Debug(" -> No chains inside currentSlice!")
+         self.logger.debug(" -> No chains inside currentSlice!")
          return
+
+      # The list of expiry dates will change once a day (at most). See if we have already processed this list for the current date
+      if self.Time.date() in self.expiryList:
+         # Get the expiryList from the dictionary
+         expiryList = self.expiryList.get(self.Time.date())
+      else:
+         # Get the list of expiry dates, sorted in reverse order
+         expiryList = sorted(set([contract.Expiry for contract in chain]), reverse = True)
+         # Add the list to the dictionary
+         self.expiryList[self.Time.date()] = expiryList
+         # Log the list of expiration dates found in the chain
+         self.logger.debug("Expiration dates in the chain:")
+         for expiry in expiryList:
+            self.logger.debug(f" -> {expiry}")
 
       # Loop through all strategies
       for strategy in self.strategies:
          # Run the strategy
-         strategy.run(chain)
+         strategy.run(chain, expiryList = expiryList)
       
    
    def OnOrderEvent(self, orderEvent):
+      # Log the order event
+      self.logger.debug(orderEvent)
    
       # Loop through all strategies
       for strategy in self.strategies:
