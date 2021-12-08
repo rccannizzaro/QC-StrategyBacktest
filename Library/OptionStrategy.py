@@ -20,21 +20,80 @@ from OptionStrategyOrder import *
 class OptionStrategy(OptionStrategyOrder):
 
    def run(self, chain, expiryList = None):
+
+      # Get the context
+      context = self.context
+      # Get the strategy parameters
+      parameters = self.parameters
+      
+      # DTE range
+      dte = parameters["dte"]
+      dteWindow = parameters["dteWindow"]
+
+      # Controls whether to select the furtest or the earliest expiry date
+      useFurthestExpiry = parameters["useFurthestExpiry"]
+      # Controls whether to enable dynamic selection of the expiry date
+      dynamicDTESelection = parameters["dynamicDTESelection"]      
+      # Controls whether to allow mutiple entries for the same expiry date
+      allowMultipleEntriesPerExpiry = parameters["allowMultipleEntriesPerExpiry"]
+
+      # Set the DTE range (make sure values are not negative)
+      minDte = max(0, dte - dteWindow)
+      maxDte = max(0, dte)
+
+      # Check if the epiryList was specified as an input
       if expiryList == None:
          # List of expiry dates, sorted in reverse order
-         expiryList = sorted(set([contract.Expiry for contract in chain]), reverse = True)
+         expiryList = sorted(set([contract.Expiry for contract in chain
+                                    if minDte <= (contract.Expiry.date() - self.Time.date()).days <= maxDte
+                                  ]
+                                 )
+                             , reverse = True
+                             )
          # Log the list of expiration dates found in the chain
          self.logger.debug(f"Expiration dates in the chain: {len(expiryList)}")  
          for expiry in expiryList:
             self.logger.debug(f" -> {expiry}")
 
-      # Get the furthest expiry date
-      expiry = expiryList[0]
+      # Exit if we haven't found any Expiration cycles to process
+      if not expiryList:
+         return
+         
+      
+      # Get the DTE of the last closed position
+      lastClosedDte = None
+      if self.recentlyClosedDTE:
+         while(self.recentlyClosedDTE):
+            # Pop the oldest entry in the list (FIFO)
+            lastClosedDte = self.recentlyClosedDTE.pop(0)
+            if lastClosedDte >= minDte:
+               # We got a good entry, get out of the loop
+               break
+            else:
+               # Reset the value for the next iteration
+               lastClosedDte = None
+
+      # Check if we need to do dynamic DTE selection
+      if dynamicDTESelection and lastClosedDte != None:
+         # Get the expiration with the nearest DTE as that of the last closed position
+         expiry = sorted(expiryList
+                         , key = lambda expiry: abs((expiry.date() - context.Time.date()).days - lastClosedDte)
+                         , reverse = False
+                         )[0]
+      else:
+         # Determine the index used to select the expiry date:
+         # useFurthestExpiry = True -> expiryListIndex = 0 (takes the first entry -> furthest expiry date since the expiry list is sorted in reverse order)
+         # useFurthestExpiry = False -> expiryListIndex = -1 (takes the last entry -> earliest expiry date since the expiry list is sorted in reverse order)
+         expiryListIndex = int(useFurthestExpiry) - 1
+         # Get the expiry date
+         expiry = expiryList[expiryListIndex]
+         
+         
       # Convert the date to a string
       expiryStr = expiry.strftime("%Y-%m-%d")
       
       # Proceed if we have not already opened a position on the given expiration (unless we are allowed to open multiple positions on the same expiry date)
-      if(self.parameters["allowMultipleEntriesPerExpiry"] or expiryStr not in self.openPositions):
+      if(parameters["allowMultipleEntriesPerExpiry"] or expiryStr not in self.openPositions):
          # Filter the contracts in the chain, keep only the ones expiring on the given date
          filteredChain = self.filterByExpiry(chain, expiry = expiry, computeGreeks = True)
          # Call the getOrder method of the class implementing OptionStrategy 
@@ -93,7 +152,7 @@ class OptionStrategy(OptionStrategyOrder):
       sidesDesc = order["sidesDesc"]
       midPrices = order["midPrices"]
       strikes = order["strikes"]
-      IVs = order["IVs"]
+      IVs = order["IV"]
       expiry = order["expiry"]
       targetPremium = order["targetPremium"]
       maxOrderQuantity = order["maxOrderQuantity"]
@@ -195,14 +254,14 @@ class OptionStrategy(OptionStrategyOrder):
             position[f"{self.name}.{key}.PnL.EMA({emaMemory})"] = 0.0
       
       # Add details about the greeks, and create placeholders to keep track of their range (Min, Avg, Max)
-      for greek in ["delta", "gamma", "vega", "theta"]:
+      for greek in ["delta", "gamma", "vega", "theta", "rho", "vomma", "elasticity"]:
          for key in sidesDesc:
-            position[f"{self.name}.{key}.{greek.title()}"] = order[f"{greek}s"][key]
+            position[f"{self.name}.{key}.{greek.title()}"] = order[f"{greek}"][key]
             if parameters["includeLegDetails"]:
-               position[f"{self.name}.{key}.{greek.title()}.Min"] = order[f"{greek}s"][key]
-               position[f"{self.name}.{key}.{greek.title()}.Avg"] = order[f"{greek}s"][key]
-               position[f"{self.name}.{key}.{greek.title()}.Max"] = order[f"{greek}s"][key]
-               position[f"{self.name}.{key}.{greek.title()}.EMA({emaMemory})"] = order[f"{greek}s"][key]
+               position[f"{self.name}.{key}.{greek.title()}.Min"] = order[f"{greek}"][key]
+               position[f"{self.name}.{key}.{greek.title()}.Avg"] = order[f"{greek}"][key]
+               position[f"{self.name}.{key}.{greek.title()}.Max"] = order[f"{greek}"][key]
+               position[f"{self.name}.{key}.{greek.title()}.EMA({emaMemory})"] = order[f"{greek}"][key]
             
        # Add details about the IV 
       for key in sidesDesc:
@@ -367,7 +426,7 @@ class OptionStrategy(OptionStrategyOrder):
       greeks["midPrice"] = self.midPrice(contract)
       
       # List of variables for which we are going to update the stats
-      vars = ["midPrice", "Delta", "Gamma", "Vega", "Theta", "IV"]
+      vars = ["midPrice", "Delta", "Gamma", "Vega", "Theta", "Rho", "Vomma", "Elasticity", "IV"]
       
       # Get the fill price at the open
       openFillPrice = bookPosition[f"{fieldPrefix}.openFillPrice"]
@@ -523,6 +582,11 @@ class OptionStrategy(OptionStrategyOrder):
          removedPosition = self.openPositions.pop(positionKey)
          # Decrement the counter of active positions
          context.currentActivePositions -= 1
+         
+         # Compute the DTE at the time of closing the position
+         closeDte = (contract.Expiry.date() - context.Time.date()).days
+         # Add this DTE to the FIFO list
+         self.recentlyClosedDTE.append(closeDte)
 
          # ###########################
          # Collect Performance metrics

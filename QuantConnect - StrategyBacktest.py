@@ -133,6 +133,13 @@ class StrategyBacktest(QCAlgorithm):
       # Updating with high frequency (i.e. every 5 minutes) will slow down the execution
       self.legDatailsUpdateFrequency = 30
       
+      
+      # Controls whether to use the furthest (True) or the earliest (False) expiration date when multiple expirations are available in the chain
+      self.useFurthestExpiry = True
+      # Controls whether to consider the DTE of the last closed position when opening a new one:
+      # If True, the Expiry date of the new position is selected such that the open DTE is the nearest to the DTE of the closed position
+      self.dynamicDTESelection = False
+      
       # ########################################################################
       # Trading Strategies. 
       #   - Multiple strategies can be executed at the same time

@@ -29,7 +29,13 @@ class OptionStrategyOrder:
       , "slippage": 0.0
       , "profitTarget": 0.6
       , "stopLossMultiplier": 1.5
+      # If multiple expirations are available in the chain, should we use the furthest (True) or the earliest (False)
+      , "useFurthestExpiry": True
+      # Controls whether to consider the DTE of the last closed position when opening a new one:
+      # If True, the Expiry date of the new position is selected such that the open DTE is the nearest to the DTE of the closed position
+      , "dynamicDTESelection": False
       , "dte": 45
+      , "dteWindow": 7
       , "dteThreshold": 21
       , "forceDteThreshold": False
       # Credit Targeting: either using a fixed credit amount (targetPremium) or a dynamic credit (percentage of Net Liquidity)
@@ -116,6 +122,8 @@ class OptionStrategyOrder:
       self.workingOrders = {}
       # Create dictionary to keep track of all the limit orders
       self.limitOrders = {}
+      # Create FIFO list to keep track of all the recently closed positions (needed for the Dynamic DTE selection)
+      self.recentlyClosedDTE = []
 
 
    # Interface method. Must be implemented by the inheriting class
@@ -197,11 +205,14 @@ class OptionStrategyOrder:
       
       # Dictionaries to keep track of all the strikes, Delta and IV
       strikes = {}
-      deltas = {}
-      gammas = {}
-      vegas = {}
-      thetas = {}
-      IVs = {}
+      delta = {}
+      gamma = {}
+      vega = {}
+      theta = {}
+      rho = {}
+      vomma = {}
+      elasticity = {}
+      IV = {}
       midPrices = {}
 
       # Compute the Mid-Price and Bid-Ask spread for the full order
@@ -252,11 +263,14 @@ class OptionStrategyOrder:
          # Set the strike in the dictionary -> "<short|long><Call|Put>": <strike>
          strikes[f"{orderSideDesc}"] = contract.Strike
          # Set the Greeks and IV in the dictionary -> "<short|long><Call|Put>": <greek|IV>
-         deltas[f"{orderSideDesc}"] = contract.BSMGreeks.Delta
-         gammas[f"{orderSideDesc}"] = contract.BSMGreeks.Gamma
-         vegas[f"{orderSideDesc}"] = contract.BSMGreeks.Vega
-         thetas[f"{orderSideDesc}"] = contract.BSMGreeks.Theta
-         IVs[f"{orderSideDesc}"] = contract.BSMImpliedVolatility
+         delta[f"{orderSideDesc}"] = contract.BSMGreeks.Delta
+         gamma[f"{orderSideDesc}"] = contract.BSMGreeks.Gamma
+         vega[f"{orderSideDesc}"] = contract.BSMGreeks.Vega
+         theta[f"{orderSideDesc}"] = contract.BSMGreeks.Theta
+         rho[f"{orderSideDesc}"] = contract.BSMGreeks.Rho
+         vomma[f"{orderSideDesc}"] = contract.BSMGreeks.Vomma
+         elasticity[f"{orderSideDesc}"] = contract.BSMGreeks.Elasticity
+         IV[f"{orderSideDesc}"] = contract.BSMImpliedVolatility
 
          # Get the latest mid-price
          midPrice = self.midPrice(contract)
@@ -340,11 +354,14 @@ class OptionStrategyOrder:
                , "contractDictionary": contractDictionary
                , "strikes": strikes
                , "midPrices": midPrices
-               , "deltas": deltas
-               , "gammas": gammas
-               , "vegas": vegas
-               , "thetas": thetas
-               , "IVs": IVs
+               , "delta": delta
+               , "gamma": gamma
+               , "vega": vega
+               , "theta": theta
+               , "rho": rho
+               , "vomma": vomma
+               , "elasticity": elasticity
+               , "IV": IV
                , "contracts": contracts
                , "targetPremium": targetPremium
                , "maxOrderQuantity": maxOrderQuantity
