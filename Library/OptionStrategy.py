@@ -24,7 +24,7 @@ class OptionStrategy(OptionStrategyOrder):
          # List of expiry dates, sorted in reverse order
          expiryList = sorted(set([contract.Expiry for contract in chain]), reverse = True)
          # Log the list of expiration dates found in the chain
-         self.logger.debug("Expiration dates in the chain:")
+         self.logger.debug(f"Expiration dates in the chain: {len(expiryList)}")  
          for expiry in expiryList:
             self.logger.debug(f" -> {expiry}")
 
@@ -32,9 +32,9 @@ class OptionStrategy(OptionStrategyOrder):
       expiry = expiryList[0]
       # Convert the date to a string
       expiryStr = expiry.strftime("%Y-%m-%d")
-
-      # Proceed if we have not already opened a position on the given expiration
-      if(expiryStr not in self.openPositions):
+      
+      # Proceed if we have not already opened a position on the given expiration (unless we are allowed to open multiple positions on the same expiry date)
+      if(self.parameters["allowMultipleEntriesPerExpiry"] or expiryStr not in self.openPositions):
          # Filter the contracts in the chain, keep only the ones expiring on the given date
          filteredChain = self.filterByExpiry(chain, expiry = expiry, computeGreeks = True)
          # Call the getOrder method of the class implementing OptionStrategy 
@@ -131,10 +131,16 @@ class OptionStrategy(OptionStrategyOrder):
       order["orderTag"] = orderTag
       # Mark the time when this order has been submitted. This is needed to determine when to cancel Limit orders
       order["submittedDttm"] = currentDttm
+      
+      if parameters["allowMultipleEntriesPerExpiry"]:
+         positionKey = orderId
+      else:
+         positionKey = expiryStr
 
       # Position dictionary. Used to keep track of the position and to report the results (will be converted into a flat csv)
       position = {"orderId"                 : orderId
                   , "orderTag"              : orderTag
+                  , "Strategy"              : self.name
                   , "expiryStr"             : expiryStr
                   , "openDttm"              : currentDttm
                   , "openDt"                : currentDttm.strftime("%Y-%m-%d")
@@ -210,7 +216,7 @@ class OptionStrategy(OptionStrategyOrder):
       # Add this position to the global dictionary
       context.allPositions[orderId] = position
       # Add the details of this order to the openPositions dictionary.
-      self.openPositions[expiryStr] = order
+      self.openPositions[positionKey] = order
 
       # Keep track of all the working orders
       self.workingOrders[orderTag] = {}
@@ -224,7 +230,8 @@ class OptionStrategy(OptionStrategyOrder):
          # Get the contract side (Long/Short)
          orderSide = contractSide[contract.Symbol]
          # Map each contract to the openPosition dictionary (key: expiryStr) 
-         self.workingOrders[orderTag][contract.Symbol] = {"orderId": orderId
+         self.workingOrders[orderTag][contract.Symbol] = {"positionKey": positionKey
+                                                          , "orderId": orderId
                                                           , "expiryStr" : expiryStr
                                                           , "orderType": "open"
                                                           , "fills": 0
@@ -428,6 +435,7 @@ class OptionStrategy(OptionStrategyOrder):
 
       # Get the order id and expiryStr value for the contract
       orderId = contractInfo["orderId"]
+      positionKey = contractInfo["positionKey"]
       expiryStr = contractInfo["expiryStr"]
       orderType = contractInfo["orderType"]
 
@@ -435,11 +443,11 @@ class OptionStrategy(OptionStrategyOrder):
       self.logger.debug(f" -> Processing order id {orderId} (orderTag: {orderTag}  -  orderType: {orderType}  -  Expiry: {expiryStr})")
 
       # Exit if this expiry date is not in the list of open positions
-      if expiryStr not in self.openPositions:
+      if positionKey not in self.openPositions:
          return
 
       # Retrieve the open position
-      openPosition = self.openPositions[expiryStr]
+      openPosition = self.openPositions[positionKey]
       # Retrieved the book position (this it the full entry inside allPositions that will be converted into a CSV record)
       bookPosition = context.allPositions[orderId]
       
@@ -512,7 +520,7 @@ class OptionStrategy(OptionStrategyOrder):
          # Store the PnL for the position
          bookPosition["P&L"] = positionPnL
          # Now we can remove the position from the self.openPositions dictionary
-         removedPosition = self.openPositions.pop(expiryStr)
+         removedPosition = self.openPositions.pop(positionKey)
          # Decrement the counter of active positions
          context.currentActivePositions -= 1
 
@@ -674,16 +682,26 @@ class OptionStrategy(OptionStrategyOrder):
       orderMidPrice = positionDetails["orderMidPrice"]
       limitOrderPrice = positionDetails["limitOrderPrice"]
       bidAskSpread = positionDetails["bidAskSpread"]
+      
+      if parameters["allowMultipleEntriesPerExpiry"]:
+         positionKey = orderId
+      else:
+         positionKey = expiryStr
 
       # Get the details currently open position 
-      openPosition = self.openPositions[expiryStr]
+      openPosition = self.openPositions[positionKey]
       # Extract the expiry date
       expiry = openPosition["expiry"]
+      # Get the last trading day before expiration
+      expiryLastTradingDay = openPosition["expiryLastTradingDay"]
+      # Get the date/time threshold by which the position must be closed (on the last trading day before expiration)
+      expiryMarketCloseCutoffDttm = openPosition["expiryMarketCloseCutoffDttm"]
+      
       # Get the contracts and their side
       contracts = openPosition["contracts"]
       contractSide = openPosition["contractSide"]
       # Set the expiration threshold at 15:40 of the expiration date (but no later than the market close cut-off time).
-      expirationThreshold = min(expiry + timedelta(hours = 15, minutes = 40), datetime.combine(expiry, parameters["marketCloseCutoffTime"]))
+      expirationThreshold = min(expiryLastTradingDay + timedelta(hours = 15, minutes = 40), expiryMarketCloseCutoffDttm)
       # Set the expiration date for the Limit order. Make sure it does not exceed the expiration threshold
       limitOrderExpiryDttm = min(context.Time + parameters["limitOrderExpiration"], expirationThreshold)
 
@@ -729,7 +747,7 @@ class OptionStrategy(OptionStrategyOrder):
       # Set the Limit Order price of the position at the time of closing
       context.allPositions[orderId]["closeOrderLimitPrice"] = limitOrderPrice
       # Set the close DTE
-      context.allPositions[orderId]["closeDTE"] = (self.openPositions[expiryStr]["expiry"].date() - context.Time.date()).days
+      context.allPositions[orderId]["closeDTE"] = (openPosition["expiry"].date() - context.Time.date()).days
 
       if useMarketOrders:
          # Log the parameters used to validate the order
@@ -747,7 +765,7 @@ class OptionStrategy(OptionStrategyOrder):
          orderQuantity = orderParameters["orderQuantity"]
          limitPrice = orderParameters["limitPrice"]
          # Map each contract to the openPosition dictionary (-> expiryStr) 
-         self.workingOrders[orderTag][symbol] = {"orderId": orderId, "expiryStr" : expiryStr, "orderType": "close", "fills": 0}
+         self.workingOrders[orderTag][symbol] = {"positionKey": positionKey, "orderId": orderId, "expiryStr" : expiryStr, "orderType": "close", "fills": 0}
 
          # Determine what type of order (Limit/Market) should be executed.
          if useMarketOrders:
@@ -777,13 +795,13 @@ class OptionStrategy(OptionStrategyOrder):
       self.manageLimitOrders()
 
       # Loop through all open positions
-      for expiryStr in list(self.openPositions):
+      for positionKey in list(self.openPositions):
          # Skip this contract if in the meantime it has been removed by the onOrderEvent
-         if expiryStr not in self.openPositions:
+         if positionKey not in self.openPositions:
             continue
 
          # Get the position
-         position = self.openPositions[expiryStr]
+         position = self.openPositions[positionKey]
          # Get the order tag
          orderTag = position["orderTag"]
          # How many days to expiration are left for this position
@@ -871,7 +889,7 @@ class OptionStrategy(OptionStrategyOrder):
                             or positionPnL >= 0 # Soft stop: close as soon as it is profitable
                             ) 
                        )
-                   or (currentDte == 0 and context.Time.time() > parameters["marketCloseCutoffTime"]) # The option expires today and we are 5 minutes away from market close
+                   or (context.Time > position["expiryMarketCloseCutoffDttm"]) # This is the last trading day before expiration, we bave reached the cutoff time
                    ):
                   # Close the position
                   self.closePosition(positionDetails, stopLossFlg = stopLossFlg)
@@ -888,8 +906,8 @@ class OptionStrategy(OptionStrategyOrder):
                   if orderTag in self.limitOrders:
                      self.limitOrders.pop(orderTag)
                   # Remove this position from the list of open positions
-                  if expiryStr in self.openPositions:
-                     self.openPositions.pop(expiryStr)
+                  if positionKey in self.openPositions:
+                     self.openPositions.pop(positionKey)
                   # Reset the order from the self.workingOrders dictionary
                   self.workingOrders[orderTag] = {}
                   # Mark the order as being cancelled

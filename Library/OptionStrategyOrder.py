@@ -67,6 +67,8 @@ class OptionStrategyOrder:
       , "includeCancelledOrders": True
       # Controls whether to include details on each leg (open/close fill price and descriptive statistics about mid-price, Greeks, and IV)
       , "includeLegDetails": False
+      # Control whether to allow multiple positions to be opened for the same Expiration date
+      , "allowMultipleEntriesPerExpiry": False
       # The frequency (in minutes) with which the leg details are updated (used only if includeLegDetails = True)
       , "legDatailsUpdateFrequency": 30
       # Controls the memory (in minutes) of EMA process. The exponential decay is computed such that the contribution of each value decays by 95% after <emaMemory> minutes (i.e. decay^emaMemory = 0.05)
@@ -158,6 +160,13 @@ class OptionStrategyOrder:
       return maxOrderQuantity
 
 
+   def lastTradingDay(self, expiry):
+      # Get the trading calendar
+      tradingCalendar = self.context.TradingCalendar
+      # Find the last trading day for the given expiration date
+      lastDay = list(tradingCalendar.GetDaysByType(TradingDayType.BusinessDay, expiry - timedelta(days = 20), expiry))[-1].Date
+      return lastDay
+
    # Create dictionary with the details of the order to be submitted
    def getOrderDetails(self, contracts, sides, strategy, sell = True, strategyId = None, expiry = None, sidesDesc = None):
 
@@ -175,6 +184,10 @@ class OptionStrategyOrder:
 
       # Get the Expiration from the first contract (unless otherwise specified
       expiry = expiry or contracts[0].Expiry
+      # Get the last trading day for the given expiration date (in case it falls on a holiday)
+      expiryLastTradingDay = self.lastTradingDay(expiry)
+      # Set the date/time threshold by which the position must be closed (on the last trading day before expiration)
+      expiryMarketCloseCutoffDttm = datetime.combine(expiryLastTradingDay, parameters["marketCloseCutoffTime"])
       # Dictionary to map each contract symbol to the side (short/long) 
       contractSide = {}
       # Dictionary to map each contract symbol to its decription 
@@ -316,6 +329,8 @@ class OptionStrategyOrder:
       # Create order details
       order = {"expiry": expiry
                , "expiryStr": expiry.strftime("%Y-%m-%d")
+               , "expiryLastTradingDay": expiryLastTradingDay
+               , "expiryMarketCloseCutoffDttm": expiryMarketCloseCutoffDttm
                , "strategyId": strategyId
                , "strategy": strategy
                , "sides": sides

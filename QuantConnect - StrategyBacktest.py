@@ -124,6 +124,9 @@ class StrategyBacktest(QCAlgorithm):
       #Controls whether to include Cancelled orders (Limit orders that didn't fill) in the final output
       self.includeCancelledOrders = True
 
+      # Controls whether to allow multiple positions to be opened for the same Expiration date
+      self.allowMultipleEntriesPerExpiry = False
+      
       # Controls whether to include details on each leg (open/close fill price and descriptive statistics about mid-price, Greeks, and IV)
       self.includeLegDetails = False
       # The frequency (in minutes) with which the leg details are updated (used only if includeLegDetails = True). 
@@ -166,8 +169,10 @@ class StrategyBacktest(QCAlgorithm):
       # Set brokerage model and margin account
       self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Margin)
 
-      # Frequency (in minutes) with which the algorithm will check to open new positions
-      self.scheduleFrequency = 30
+      # The start time at which the algorithm will start scheduling the strategy execution (to open new positions). No positions will be opened before this time
+      self.scheduleStartTime = time(9, 45, 0)
+      # Periodic interval with which the algorithm will check to open new positions
+      self.scheduleFrequency = timedelta(hours = 1)
       
       # Setup the backtesting algorithm
       self.setupBacktest()
@@ -314,8 +319,9 @@ class StrategyBacktest(QCAlgorithm):
          # Underlying is an equity
          underlying = self.AddEquity(self.ticker, self.timeResolution)
          option = self.AddOption(underlying.Symbol, self.timeResolution)
-         # Set the benchmark. This seems to work only for equities
-         self.SetBenchmark(underlying.Symbol)
+         
+      # Set the benchmark.
+      self.SetBenchmark(underlying.Symbol)
 
 
       # Store the symbol for the option and the underlying
@@ -458,8 +464,21 @@ class StrategyBacktest(QCAlgorithm):
       if self.IsWarmingUp or not self.IsMarketOpen(self.underlyingSymbol):
          return
       
-      # Only run this at the specified frequency 
-      if self.Time.minute % self.scheduleFrequency != 0:
+      # Compute the schedule start datetime
+      scheduleStartDttm = datetime.combine(self.Time.date(), self.scheduleStartTime)
+      
+      # Exit if we have not reached the the schedule start datetime
+      if self.Time < scheduleStartDttm:
+         return
+         
+      # Get the number of minutes since the schedule start time
+      minutesSincescheduleStart = round((self.Time - scheduleStartDttm).seconds/60)
+      
+      # Convert the schedule frequency (timedelta) into a number of minutes
+      scheduleFrequencyMinutes = round(self.scheduleFrequency.seconds/60)
+      
+      # Exit if we are not at the right scheduled interval
+      if minutesSincescheduleStart % scheduleFrequencyMinutes != 0:
          return
 
       # Do not open any new positions if we have reached the maximum
@@ -480,15 +499,27 @@ class StrategyBacktest(QCAlgorithm):
          # Get the expiryList from the dictionary
          expiryList = self.expiryList.get(self.Time.date())
       else:
+         # Set the DTE range (make sure values are not negative)
+         minDte = max(0, self.dte - self.dteWindow)
+         maxDte = max(0, self.dte)
          # Get the list of expiry dates, sorted in reverse order
-         expiryList = sorted(set([contract.Expiry for contract in chain]), reverse = True)
+         expiryList = sorted(set([contract.Expiry for contract in chain 
+                                    if minDte <= (contract.Expiry.date() - self.Time.date()).days <= maxDte
+                                  ]
+                                 )
+                             , reverse = True
+                             )
          # Add the list to the dictionary
          self.expiryList[self.Time.date()] = expiryList
          # Log the list of expiration dates found in the chain
-         self.logger.debug("Expiration dates in the chain:")
+         self.logger.debug(f"Expiration dates in the chain: {len(expiryList)}")
          for expiry in expiryList:
             self.logger.debug(f" -> {expiry}")
 
+      # Exit if we haven't found any Expiration cycles to process
+      if not expiryList:
+         return
+      
       # Loop through all strategies
       for strategy in self.strategies:
          # Run the strategy

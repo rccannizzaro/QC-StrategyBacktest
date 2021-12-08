@@ -138,7 +138,7 @@ class TEBombShelterStrategy(OptionStrategy):
       expiryStr = frontExpiry.strftime("%Y-%m-%d")
 
       # Proceed if we have not already opened a position on the given expiration
-      if(expiryStr not in self.openPositions):
+      if(self.parameters["allowMultipleEntriesPerExpiry"] or expiryStr not in self.openPositions):
          # Filter the contracts in the chain, keep only the ones expiring on the back-cycle
          backChain = self.filterByExpiry(chain, expiry = backExpiry, computeGreeks = True)
          # Filter the contracts in the chain, keep only the ones expiring on the front-cycle
@@ -246,10 +246,10 @@ class TEBombShelterStrategy(OptionStrategy):
       context.Plot("TE Bomb Shelter Summary", "Bomb Shelter PnL", netPnL)
       
       # Loop through all the open positions (specific to this strategy)
-      for expiryStr in list(self.openPositions):
-         if expiryStr in self.openPositions:
+      for positionKey in list(self.openPositions):
+         if positionKey in self.openPositions:
             # Extract the open position and the order id
-            openPosition = self.openPositions[expiryStr]
+            openPosition = self.openPositions[positionKey]
             orderId = openPosition["orderId"]
             # Retrieve the position details from the book
             bookPosition = context.allPositions[orderId]
