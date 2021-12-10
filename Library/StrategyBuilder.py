@@ -13,6 +13,8 @@
 ########################################################################################
 
 from Logger import *
+from ContractUtils import *
+from BSMLibrary import *
 
 class StrategyBuilder:
 
@@ -25,18 +27,12 @@ class StrategyBuilder:
    def __init__(self, context):
       # Set the context (QCAlgorithm object)
       self.context = context
+      # Initialize the BSM pricing model
+      self.bsm = BSM(context)
       # Set the logger
       self.logger = Logger(context, className = type(self).__name__, logLevel = context.logLevel)
-
-
-   # Returns the mid-price of an option contract
-   def midPrice(self, contract):
-      return 0.5*(contract.BidPrice + contract.AskPrice)
-
-
-   # Returns the mid-price of an option contract
-   def bidAskSpread(self, contract):
-      return abs(contract.AskPrice - contract.BidPrice)
+      # Initialize the contract utils
+      self.contractUtils = ContractUtils(context)
 
 
    # Returns True/False based on whether the option contract is of the specified type (Call/Put)
@@ -65,7 +61,7 @@ class StrategyBuilder:
                                     for contract in filteredChain 
                                        if self.optionTypeFilter(contract, type)
                                  ]
-                                , key = lambda x: abs(x.Strike - x.UnderlyingLastPrice)
+                                , key = lambda x: abs(x.Strike - self.contractUtils.getUnderlyingLastPrice(x.UnderlyingLastPrice))
                                 , reverse = False
                                 )
 
@@ -95,29 +91,199 @@ class StrategyBuilder:
       return ATMStrike
 
 
+
+   # Returns the Strike of the contract with the closest Delta
+   # Assumptions: 
+   #  - Input list contracts must be sorted by ascending strike
+   #  - All contracts in the list must be of the same type (Call|Put)
+   def getDeltaContract(self, contracts, delta = None):
+      # Skip processing if the option type or Delta has not been specified
+      if delta == None or not contracts:
+         return
+      
+      leftIdx = 0
+      rightIdx = len(contracts)-1
+      
+      # Compute the Greeks for the contracts at the extremes
+      self.bsm.setGreeks([contracts[leftIdx], contracts[rightIdx]])
+      
+      # #######################################################
+      # Check if the requested Delta is outside of the range
+      # #######################################################
+      if contracts[rightIdx].Right == OptionRight.Call:
+         # Check if the furthest OTM Call has a Delta higher than the requested Delta
+         if abs(contracts[rightIdx].BSMGreeks.Delta) > delta/100.0:
+            # The requested delta is outside the boundary, return the strike of the furthest OTM Call
+            return contracts[rightIdx]
+         # Check if the furthest ITM Call has a Delta lower than the requested Delta   
+         elif abs(contracts[leftIdx].BSMGreeks.Delta) < delta/100.0:
+            # The requested delta is outside the boundary, return the strike of the furthest ITM Call
+            return contracts[leftIdx]
+      else:
+         # Check if the furthest OTM Put has a Delta higher than the requested Delta
+         if abs(contracts[leftIdx].BSMGreeks.Delta) > delta/100.0:
+            # The requested delta is outside the boundary, return the strike of the furthest OTM Put
+            return contracts[leftIdx]
+         # Check if the furthest ITM Put has a Delta lower than the requested Delta   
+         elif abs(contracts[rightIdx].BSMGreeks.Delta) < delta/100.0:
+            # The requested delta is outside the boundary, return the strike of the furthest ITM Put
+            return contracts[rightIdx]
+      
+      # The requested Delta is inside the range, use the Bisection method to find the contract with the closest Delta
+      while (rightIdx-leftIdx) > 1:
+         # Get the middle point
+         middleIdx = round((leftIdx + rightIdx)/2.0)
+         middleContract = contracts[middleIdx]
+         # Compute the greeks for the contract in the middle
+         self.bsm.setGreeks(middleContract)
+         contractDelta = contracts[middleIdx].BSMGreeks.Delta
+         # Determine which side we need to continue the search
+         if(abs(contractDelta) > delta/100.0):
+            if middleContract.Right == OptionRight.Call:
+               # The requested Call Delta is on the right side
+               leftIdx = middleIdx
+            else:
+               # The requested Put Delta is on the left side
+               rightIdx = middleIdx
+         else:
+            if middleContract.Right == OptionRight.Call:
+               # The requested Call Delta is on the left side
+               rightIdx = middleIdx
+            else:
+               # The requested Put Delta is on the right side
+               leftIdx = middleIdx
+      
+      # At this point where should only be two contracts remaining: choose the contract with the closest Delta
+      deltaContract = sorted([contracts[leftIdx], contracts[rightIdx]]
+                             , key = lambda x: abs(abs(x.BSMGreeks.Delta) - delta/100.0)
+                             , reverse = False
+                             )[0]
+      
+      return deltaContract
+
+
+
+   def getDeltaStrike(self, contracts, delta = None):
+      deltaStrike = None
+      # Get the contract with the closest Delta
+      deltaContract = self.getDeltaContract(contracts, delta = delta)
+      # Check if we got any contract
+      if deltaContract != None:
+         # Get the strike
+         deltaStrike = deltaContract.Strike
+      # Return the strike
+      return deltaStrike
+
+   def getFromDeltaStrike(self, contracts, delta = None, default = None):
+      fromDeltaStrike = default
+      # Get the call with the closest Delta
+      deltaContract = self.getDeltaContract(contracts, delta = delta)
+      # Check if we found the contract
+      if deltaContract:
+         if abs(deltaContract.BSMGreeks.Delta) >= delta/100.0:
+            # The contract is in the required range. Get the Strike
+            fromDeltaStrike = deltaContract.Strike
+         else:
+            # Calculate the offset: +0.01 in case of Puts, -0.01 in case of Calls
+            offset = 0.01 * (2*int(deltaContract.Right == OptionRight.Put)-1)
+            # The contract is outside of the required range. Get the Strike and add (Put) or subtract (Call) a small offset so we can filter for contracts above/below this strike
+            fromDeltaStrike = deltaContract.Strike + offset
+      return fromDeltaStrike
+
+   def getToDeltaStrike(self, contracts, delta = None, default = None):
+      toDeltaStrike = default
+      # Get the put with the closest Delta
+      deltaContract = self.getDeltaContract(contracts, delta = delta)
+      # Check if we found the contract
+      if deltaContract:
+         if abs(deltaContract.BSMGreeks.Delta) <= delta/100.0:
+            # The contract is in the required range. Get the Strike
+            toDeltaStrike = deltaContract.Strike
+         else:
+            # Calculate the offset: +0.01 in case of Calls, -0.01 in case of Puts
+            offset = 0.01 * (2*int(deltaContract.Right == OptionRight.Call)-1)
+            # The contract is outside of the required range. Get the Strike and add (Call) or subtract (Put) a small offset so we can filter for contracts above/below this strike
+            toDeltaStrike = deltaContract.Strike + offset
+      return toDeltaStrike
+
+
+   def getPutFromDeltaStrike(self, contracts, delta = None):   
+      return self.getFromDeltaStrike(contracts, delta = delta, default = 0.0)
+      
+   def getCallFromDeltaStrike(self, contracts, delta = None):   
+      return self.getFromDeltaStrike(contracts, delta = delta, default = float('Inf'))
+
+   def getPutToDeltaStrike(self, contracts, delta = None):   
+      return self.getToDeltaStrike(contracts, delta = delta, default = float('Inf'))
+      
+   def getCallToDeltaStrike(self, contracts, delta = None):   
+      return self.getToDeltaStrike(contracts, delta = delta, default = 0)
+
+
    def getContracts(self, contracts, type = None, fromDelta = None, toDelta = None, fromStrike = None, toStrike = None, fromPrice = None, toPrice = None, reverse = False):
       # Make sure all constraints are set
-      fromDelta = fromDelta or 0
       fromStrike = fromStrike or 0
       fromPrice = fromPrice or 0
-      toDelta = toDelta or 100
       toStrike = toStrike or float('inf')
       toPrice = toPrice or float('inf')
 
-      # Sort the contracts by their strike in the specified order. Filter them by the specified criteria (Type/Delta/Strike/Price constrains)
-      result = sorted([contract 
-                        for contract in contracts 
-                           if self.optionTypeFilter(contract, type)
-                              # Delta constraint
-                              and (fromDelta/100.0 <= abs(contract.BSMGreeks.Delta) <= toDelta/100.0)
-                              # Strike constraint
-                              and (fromStrike <= contract.Strike <= toStrike)
-                              # Option price constraint (based on the mid-price)
-                              and (fromPrice <= self.midPrice(contract) <= toPrice)
-                     ]
-                     , key = lambda x: x.Strike
-                     , reverse = reverse
-                     )
+      # Get the Put contracts, sorted by ascending strike. Apply the Strike/Price constraints
+      puts = []
+      if type == None or type.lower() == "put":
+         puts = sorted([contract 
+                         for contract in contracts 
+                            if self.optionTypeFilter(contract, "Put")
+                            # Strike constraint
+                            and (fromStrike <= contract.Strike <= toStrike)
+                            # Option price constraint (based on the mid-price)
+                            and (fromPrice <= self.contractUtils.midPrice(contract) <= toPrice)
+                       ]
+                       , key = lambda x: x.Strike
+                       , reverse = False
+                       )
+                    
+      # Get the Call contracts, sorted by ascending strike. Apply the Strike/Price constraints
+      calls = []
+      if type == None or type.lower() == "call":
+         calls = sorted([contract 
+                          for contract in contracts 
+                             if self.optionTypeFilter(contract, "Call")
+                             # Strike constraint
+                             and (fromStrike <= contract.Strike <= toStrike)
+                             # Option price constraint (based on the mid-price)
+                             and (fromPrice <= self.contractUtils.midPrice(contract) <= toPrice)
+                        ]
+                        , key = lambda x: x.Strike
+                        , reverse = False
+                        )
+
+
+      deltaFilteredPuts = puts
+      deltaFilteredcalls = calls
+      # Check if we need to filter by Delta
+      if (fromDelta or toDelta):
+         # Find the strike range for the Puts based on the From/To Delta
+         putFromDeltaStrike = self.getPutFromDeltaStrike(puts, delta = fromDelta)
+         putToDeltaStrike = self.getPutToDeltaStrike(puts, delta = toDelta)
+         # Filter the Puts based on the delta-strike range
+         deltaFilteredPuts = [contract for contract in puts
+                                 if putFromDeltaStrike <= contract.Strike <= putToDeltaStrike
+                              ]
+
+         # Find the strike range for the Calls based on the From/To Delta
+         callFromDeltaStrike = self.getCallFromDeltaStrike(calls, delta = fromDelta)
+         callToDeltaStrike = self.getCallToDeltaStrike(calls, delta = toDelta)
+         # Filter the Puts based on the delta-strike range. For the calls, the Delta decreases with increasing strike, so the order of the filter is inverted
+         deltaFilteredCalls = [contract for contract in calls
+                                 if callToDeltaStrike <= contract.Strike <= callFromDeltaStrike
+                               ]
+         
+
+      # Combine the lists and Sort the contracts by their strike in the specified order.
+      result = sorted(deltaFilteredPuts + deltaFilteredCalls
+                      , key = lambda x: x.Strike
+                      , reverse = reverse
+                      )
       # Return result
       return result   
 

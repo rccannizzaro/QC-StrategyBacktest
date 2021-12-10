@@ -16,6 +16,7 @@ import numpy as np
 from Logger import *
 from BSMLibrary import *
 from StrategyBuilder import *
+from ContractUtils import *
 
 class OptionStrategyOrder:
 
@@ -104,6 +105,8 @@ class OptionStrategyOrder:
       self.logger = Logger(context, className = type(self).__name__, logLevel = context.logLevel)
       # Initialize the BSM pricing model
       self.bsm = BSM(context)
+      # Initialize the contract utils
+      self.contractUtils = ContractUtils(context)
       # Initialize the Strategy Builder
       self.strategyBuilder = StrategyBuilder(context)
 
@@ -137,17 +140,7 @@ class OptionStrategyOrder:
    # Interface method. Must be implemented by the inheriting class
    def getOrder(self, chain):
       pass
-      
-   # Returns the mid-price of an option contract
-   def midPrice(self, contract):
-      security = self.context.Securities[contract.Symbol]
-      return 0.5*(security.BidPrice + security.AskPrice)
-
-   # Returns the mid-price of an option contract
-   def bidAskSpread(self, contract):
-      security = self.context.Securities[contract.Symbol]
-      return abs(security.AskPrice - security.BidPrice)
-
+   
    def getMaxOrderQuantity(self):
       # Get the context
       context = self.context
@@ -215,6 +208,9 @@ class OptionStrategyOrder:
       IV = {}
       midPrices = {}
 
+      # Compute the Greeks for each contract (if not already available)
+      self.bsm.setGreeks(contracts)
+      
       # Compute the Mid-Price and Bid-Ask spread for the full order
       orderMidPrice = 0.0
       bidAskSpread = 0.0
@@ -273,11 +269,11 @@ class OptionStrategyOrder:
          IV[f"{orderSideDesc}"] = contract.BSMImpliedVolatility
 
          # Get the latest mid-price
-         midPrice = self.midPrice(contract)
+         midPrice = self.contractUtils.midPrice(contract)
          # Store the midPrice in the dictionary -> "<short|long><Call|Put>": midPrice
          midPrices[f"{orderSideDesc}"] = midPrice
          # Compute the bid-ask spread
-         bidAskSpread += self.bidAskSpread(contract)         
+         bidAskSpread += self.contractUtils.bidAskSpread(contract)         
          # Adjusted mid-price (include slippage). Take the sign of orderSide to determine the direction of the adjustment
          adjustedMidPrice = midPrice + np.sign(orderSide) * slippage
          # Keep track of the total credit/debit or the order
@@ -421,7 +417,7 @@ class OptionStrategyOrder:
          return 0
 
       # Get the current price of the underlying
-      UnderlyingLastPrice = contracts[0].UnderlyingLastPrice
+      UnderlyingLastPrice = self.contractUtils.getUnderlyingLastPrice(contracts[0])
       # Evaluate the payoff at the extreme (spotPrice = 0)
       maxLoss = self.getPayoff(0, contracts, sides)
       # Evaluate the payoff at each strike

@@ -176,7 +176,7 @@ class TEBombShelterStrategy(OptionStrategy):
       # Get the short put (back cycle)
       shortPut = back_contracts[0]
       # Get the mid-price of the short put
-      midPrice = self.midPrice(shortPut)
+      midPrice = self.contractUtils.midPrice(shortPut)
       # Set the target price for the long Puts
       targetLongPrice = midPrice * hedgeAllocation / 2
       
@@ -270,8 +270,8 @@ class TEBombShelterStrategy(OptionStrategy):
             longPut = openPosition["contracts"][1]
             
             # Compute the current value of the contracts (the Long has two contracts)
-            shortValue = self.midPrice(shortPut)
-            longValue = self.midPrice(longPut) * 2
+            shortValue = self.contractUtils.midPrice(shortPut)
+            longValue = self.contractUtils.midPrice(longPut) * 2
             
             # Define the stats variable names
             shortVarName = f"TEBS_shortPut_{orderId}"

@@ -14,6 +14,7 @@
 
 import numpy as np
 import pandas as pd
+import time as timer
 from System.Drawing import Color
 from Strategies import *
 from Logger import *
@@ -138,7 +139,7 @@ class StrategyBacktest(QCAlgorithm):
       self.useFurthestExpiry = True
       # Controls whether to consider the DTE of the last closed position when opening a new one:
       # If True, the Expiry date of the new position is selected such that the open DTE is the nearest to the DTE of the closed position
-      self.dynamicDTESelection = False
+      self.dynamicDTESelection = True
       
       # ########################################################################
       # Trading Strategies. 
@@ -263,6 +264,9 @@ class StrategyBacktest(QCAlgorithm):
 
    def updateCharts(self):
 
+      # Start the timer
+      self.executionTimer.start()
+
       # Call the updateCharts method of each strategy (give a chance to update any custom charts)
       for strategy in self.strategies:
          strategy.updateCharts()
@@ -293,12 +297,9 @@ class StrategyBacktest(QCAlgorithm):
       if plotInfo.LossDetails:
          self.Plot("Loss Details", "Short Put Tested", self.stats.testedPut)
          self.Plot("Loss Details", "Short Call Tested", self.stats.testedCall)
-      #self.Plot("Win & Loss Stats", "Max Win", self.stats.maxWin)
-      #self.Plot("Win & Loss Stats", "Max Loss", -self.stats.maxLoss)
-      #underlyingPrice = None
-      #if self.Securities.ContainsKey(self.underlyingSymbol) and self.Securities[self.underlyingSymbol] != None:
-      #   underlyingPrice = self.Securities[self.underlyingSymbol].Close
-      #   self.Plot(self.ticker, self.ticker, underlyingPrice)
+      
+      # Stop the timer
+      self.executionTimer.stop()
 
 
                   
@@ -307,6 +308,9 @@ class StrategyBacktest(QCAlgorithm):
       
       # Set the logger
       self.logger = Logger(self, className = type(self).__name__, logLevel = self.logLevel)
+      
+      # Set the timer to monitor the execution performance
+      self.executionTimer = Timer(self)
       
       # Number of currently active positions
       self.currentActivePositions = 0
@@ -374,13 +378,20 @@ class StrategyBacktest(QCAlgorithm):
 
    # Coarse filter for the option chain
    def optionChainFilter(self, universe):
+      # Start the timer
+      self.executionTimer.start()
+
       # Include Weekly contracts
       # nStrikes contracts to each side of the ATM
       # Contracts expiring in the range (DTE-5, DTE)
-      return universe.IncludeWeeklys()\
-                     .Strikes(-self.nStrikesLeft, self.nStrikesRight)\
-                     .Expiration(max(0, self.dte - self.dteWindow), max(0, self.dte))
+      filteredUniverse =  universe.IncludeWeeklys()\
+                                  .Strikes(-self.nStrikesLeft, self.nStrikesRight)\
+                                  .Expiration(max(0, self.dte - self.dteWindow), max(0, self.dte))
 
+      # Stop the timer
+      self.executionTimer.stop()
+    
+      return filteredUniverse
 
    
    def optionChainProviderFilter(self, symbols, min_strike_rank, max_strike_rank, minDte, maxDte):
@@ -441,7 +452,14 @@ class StrategyBacktest(QCAlgorithm):
       return contracts   
    
    def getOptionContracts(self, slice):
+      # Start the timer
+      self.executionTimer.start()
+      
       contracts = None
+      # Set the DTE range (make sure values are not negative)
+      minDte = max(0, self.dte - self.dteWindow)
+      maxDte = max(0, self.dte)
+      
       # Loop through all chains
       for chain in slice.OptionChains:
          # Look for the specified optionSymbol      
@@ -449,7 +467,10 @@ class StrategyBacktest(QCAlgorithm):
             continue  
          # Make sure there are any contracts in this chain   
          if chain.Value.Contracts.Count != 0:
-            contracts = chain.Value
+            # Put the contracts into a list so we can cache the Greeks across multiple strategies
+            contracts = [contract for contract in chain.Value
+                              if minDte <= (contract.Expiry.date() - self.Time.date()).days <= maxDte
+                        ]
 
       # If no chains were found, use OptionChainProvider to see if we can find any contracts
       # Only do this for short term expiration contracts (DTE < 3) where slice.OptionChains usually fails to retrieve any chains
@@ -457,15 +478,17 @@ class StrategyBacktest(QCAlgorithm):
       if contracts == None and self.dte < 3:
          # Get the list of available option Symbols
          symbols = self.OptionChainProvider.GetOptionContractList(self.underlyingSymbol, self.Time)
-         # Set the DTE range (make sure values are not negative)
-         minDte = max(0, self.dte - self.dteWindow)
-         maxDte = max(0, self.dte)
          # Get the contracts
          contracts = self.optionChainProviderFilter(symbols, -self.nStrikesLeft, self.nStrikesRight, minDte, maxDte)
+
+      # Stop the timer
+      self.executionTimer.stop()
       
       return contracts
 
-   def openPosition(self):
+   def runStrategies(self):
+      # Start the timer
+      self.executionTimer.start()
       
       # Exit if the algorithm is warming up or the market is closed
       if self.IsWarmingUp or not self.IsMarketOpen(self.underlyingSymbol):
@@ -506,6 +529,9 @@ class StrategyBacktest(QCAlgorithm):
          # Get the expiryList from the dictionary
          expiryList = self.expiryList.get(self.Time.date())
       else:
+         # Start the timer
+         self.executionTimer.start(methodName = "runStrategies -> getExpiryList")
+      
          # Set the DTE range (make sure values are not negative)
          minDte = max(0, self.dte - self.dteWindow)
          maxDte = max(0, self.dte)
@@ -522,6 +548,9 @@ class StrategyBacktest(QCAlgorithm):
          self.logger.debug(f"Expiration dates in the chain: {len(expiryList)}")
          for expiry in expiryList:
             self.logger.debug(f" -> {expiry}")
+         
+         # Start the timer
+         self.executionTimer.stop(methodName = "runStrategies -> getExpiryList")
 
       # Exit if we haven't found any Expiration cycles to process
       if not expiryList:
@@ -532,19 +561,29 @@ class StrategyBacktest(QCAlgorithm):
          # Run the strategy
          strategy.run(chain, expiryList = expiryList)
       
+      # Stop the timer
+      self.executionTimer.stop()
    
    def OnOrderEvent(self, orderEvent):
+      # Start the timer
+      self.executionTimer.start()
+
       # Log the order event
       self.logger.debug(orderEvent)
    
       # Loop through all strategies
       for strategy in self.strategies:
          # Call the Strategy orderEvent handler
-         strategy.OnOrderEvent(orderEvent) 
+         strategy.handleOrderEvent(orderEvent)
+         
+      # Stop the timer
+      self.executionTimer.stop()
 
    
    def OnData(self, slice):
-   
+      # Start the timer
+      self.executionTimer.start()
+      
       # Update the charts
       self.updateCharts()
 
@@ -553,7 +592,7 @@ class StrategyBacktest(QCAlgorithm):
          return
 
       # Run the strategies to open new positions
-      self.openPosition()
+      self.runStrategies()
 
       # Loop through all strategies
       for strategy in self.strategies:
@@ -563,11 +602,22 @@ class StrategyBacktest(QCAlgorithm):
       # Update the charts (in case any position was closed)
       self.updateCharts()
 
+      # Stop the timer
+      self.executionTimer.stop()
+
 
    def OnEndOfAlgorithm(self):
    
       # Convert the dictionary into a Pandas Data Frame
       dfAllPositions = pd.DataFrame.from_dict(self.allPositions, orient = "index")
+   
+      self.Log("")
+      self.Log("---------------------------------")
+      self.Log("     Execution  Statistics       ")
+      self.Log("---------------------------------")
+      self.executionTimer.showStats()
+      self.Log("")
+      self.Log("")
    
       self.Log("")
       self.Log("---------------------------------")
@@ -621,6 +671,9 @@ class BetaFillModel(ImmediateFillModel):
       self.context = context
       
    def MarketFill(self, asset, order):
+      # Start the timer
+      self.context.executionTimer.start()
+   
       # Get the random number generator
       random = BetaFillModel.random
       # Compute the Bid-Ask spread
@@ -650,4 +703,67 @@ class BetaFillModel(ImmediateFillModel):
       fillPrice = round(offset + range * random.beta(alpha, beta), 2)
       # Update the FillPrice attribute
       fill.FillPrice = fillPrice
+      # Stop the timer
+      self.context.executionTimer.stop()
+      # Return the fill
       return fill
+
+      
+class Timer:
+
+   performanceTemplate = {"calls": 0.0
+                          , "elapsedMin": float('Inf')
+                          , "elapsedMean": None
+                          , "elapsedMax": float('-Inf')
+                          , "elapsedTotal": 0.0
+                          , "elapsedLast": None
+                          , "startTime": None
+                          }
+   
+   def __init__(self, context):
+      self.context = context
+      self.performance = {}
+      
+   def start(self, methodName = None):
+      # Get the name of the calling method
+      methodName = methodName or sys._getframe(1).f_code.co_name
+      # Get current performance stats
+      performance = self.performance.get(methodName, Timer.performanceTemplate.copy())
+      # Get the startTime
+      performance["startTime"] = timer.perf_counter()
+      # Save it back in the dictionary
+      self.performance[methodName] = performance
+      
+      
+   def stop(self, methodName = None):
+      # Get the name of the calling method
+      methodName = methodName or sys._getframe(1).f_code.co_name
+      # Get current performance stats
+      performance = self.performance.get(methodName)
+      # Compute the elapsed
+      elapsed = timer.perf_counter() - performance["startTime"]
+      # Update the stats
+      performance["calls"] += 1
+      performance["elapsedLast"] = elapsed
+      performance["elapsedMin"] = min(performance["elapsedMin"], elapsed)
+      performance["elapsedMax"] = max(performance["elapsedMax"], elapsed)
+      performance["elapsedTotal"] += elapsed
+      performance["elapsedMean"] = performance["elapsedTotal"]/performance["calls"]
+      
+   def showStats(self, methodName = None):
+      methods = methodName or self.performance.keys()
+      for method in methods:
+         performance = self.performance.get(method)
+         if performance:
+            self.context.logger.info(f"Execution Stats ({method}):")
+            for key in performance:
+               if key != "startTime":
+                  if key == "calls" or performance[key] == None:
+                     value = performance[key]
+                  elif math.isinf(performance[key]):
+                     value = None
+                  else:
+                     value = timedelta(seconds = performance[key])
+                  self.context.logger.info(f"  --> {key}:{value}")
+         else:
+            self.context.logger.warning(f"There are no execution stats available for method {method}!")

@@ -16,13 +16,18 @@ import re
 import numpy as np
 from Logger import *
 from OptionStrategyOrder import *
+from ContractUtils import *
 
 class OptionStrategy(OptionStrategyOrder):
 
    def run(self, chain, expiryList = None):
+      # Start the timer
+      self.context.executionTimer.start()
 
       # Get the context
       context = self.context
+      # Initialize the contract utils
+      self.contractUtils = ContractUtils(context)
       # Get the strategy parameters
       parameters = self.parameters
       
@@ -57,6 +62,8 @@ class OptionStrategy(OptionStrategyOrder):
 
       # Exit if we haven't found any Expiration cycles to process
       if not expiryList:
+         # Stop the timer
+         self.context.executionTimer.stop()
          return
          
       
@@ -95,14 +102,20 @@ class OptionStrategy(OptionStrategyOrder):
       # Proceed if we have not already opened a position on the given expiration (unless we are allowed to open multiple positions on the same expiry date)
       if(parameters["allowMultipleEntriesPerExpiry"] or expiryStr not in self.openPositions):
          # Filter the contracts in the chain, keep only the ones expiring on the given date
-         filteredChain = self.filterByExpiry(chain, expiry = expiry, computeGreeks = True)
+         filteredChain = self.filterByExpiry(chain, expiry = expiry)
          # Call the getOrder method of the class implementing OptionStrategy 
          order = self.getOrder(filteredChain)
          # Execute the order
          self.openPosition(order)
 
+      # Stop the timer
+      self.context.executionTimer.stop()
 
-   def filterByExpiry(self, chain, expiry = None, computeGreeks = True):
+
+   def filterByExpiry(self, chain, expiry = None, computeGreeks = False):
+      # Start the timer
+      self.context.executionTimer.start()
+      
       # Check if the expiry date has been specified
       if expiry != None:
          # Filter contracts based on the requested expiry date
@@ -111,9 +124,13 @@ class OptionStrategy(OptionStrategyOrder):
          # No filtering
          filteredChain = chain
 
-      # Check if we need to compute the Greeks
+      # Check if we need to compute the Greeks for every single contract (this is expensive!)
+      # By defauls, the Greeks are only calculated while searching for the strike with the requested delta, so there should be no need to set computeGreeks = True
       if computeGreeks:
          self.bsm.setGreeks(filteredChain)
+
+      # Stop the timer
+      self.context.executionTimer.stop()
 
       # Return the filtered contracts
       return filteredChain
@@ -125,6 +142,9 @@ class OptionStrategy(OptionStrategyOrder):
       # Exit if there is no order to process
       if order == None:
          return
+
+      # Start the timer
+      self.context.executionTimer.start()
 
       # Get the context
       context = self.context
@@ -311,8 +331,14 @@ class OptionStrategy(OptionStrategyOrder):
                                        , "limitOrderPrice": limitOrderPrice
                                        }
 
+      # Stop the timer
+      self.context.executionTimer.stop()
+
 
    def manageLimitOrders(self):
+
+      # Start the timer
+      self.context.executionTimer.start()
 
       # Get the context
       context = self.context
@@ -342,7 +368,7 @@ class OptionStrategy(OptionStrategyOrder):
          # Sign of the transaction: open -> -1,  close -> +1
          transactionSign = -orderSign
          # Get the mid price of each contract
-         prices = np.array(list(map(self.midPrice, contracts)))
+         prices = np.array(list(map(self.contractUtils.midPrice, contracts)))
          # Get the order sides
          orderSides = np.array(limitOrder["orderSides"])
          # Total slippage
@@ -350,7 +376,7 @@ class OptionStrategy(OptionStrategyOrder):
          # Compute the total order price (including slippage)
          midPrice = transactionSign * sum(orderSides * prices) - totalSlippage
          # Compute Bid-Ask spread
-         bidAskSpread = sum(list(map(self.bidAskSpread, contracts)))
+         bidAskSpread = sum(list(map(self.contractUtils.bidAskSpread, contracts)))
          # Keep track of the Limit order mid-price range
          position[f"{orderType}OrderMidPrice.Min"] = min(position[f"{orderType}OrderMidPrice.Min"], midPrice)
          position[f"{orderType}OrderMidPrice.Max"] = max(position[f"{orderType}OrderMidPrice.Max"], midPrice)
@@ -385,9 +411,15 @@ class OptionStrategy(OptionStrategyOrder):
             # Remove the order from the self.limitOrders dictionary
             self.limitOrders.pop(orderTag)
 
+      # Stop the timer
+      self.context.executionTimer.stop()
+
 
    def updateContractStats(self, bookPosition, openPosition, contract, orderType = None, fillPrice = None):
    
+      # Start the timer
+      self.context.executionTimer.start()
+
       # Get the context
       context = self.context
       # Get the strategy parameters
@@ -418,12 +450,12 @@ class OptionStrategy(OptionStrategyOrder):
       statsUpdateCount = bookPosition["statsUpdateCount"]
             
       # Compute the mid-price of the contract
-      midPrice = self.midPrice(contract)
+      midPrice = self.contractUtils.midPrice(contract)
 
       # Compute the Greeks (retrieve it as a dictionary)
       greeks = self.bsm.computeGreeks(contract).__dict__
       # Add the midPrice and PnL values to the greeks dictionary to generalize the processing loop
-      greeks["midPrice"] = self.midPrice(contract)
+      greeks["midPrice"] = midPrice
       
       # List of variables for which we are going to update the stats
       vars = ["midPrice", "Delta", "Gamma", "Vega", "Theta", "Rho", "Vomma", "Elasticity", "IV"]
@@ -459,8 +491,13 @@ class OptionStrategy(OptionStrategyOrder):
          # Update the Avg field
          bookPosition[f"{fieldName}.Avg"] = (bookPosition[f"{fieldName}.Avg"]*(statsUpdateCount-1) + fieldValue)/statsUpdateCount
      
+      # Stop the timer
+      self.context.executionTimer.stop()
 
-   def OnOrderEvent(self, orderEvent):
+   def handleOrderEvent(self, orderEvent):
+
+      # Start the timer
+      self.context.executionTimer.start()
 
       # Process only Fill events 
       if not (orderEvent.Status == OrderStatus.Filled or orderEvent.Status == OrderStatus.PartiallyFilled):
@@ -593,8 +630,12 @@ class OptionStrategy(OptionStrategyOrder):
          # ###########################
          self.updateStats(removedPosition)
 
+      # Stop the timer
+      self.context.executionTimer.stop()
 
    def updateStats(self, closedPosition):
+      # Start the timer
+      self.context.executionTimer.start()
 
       # Get the context
       context = self.context
@@ -668,8 +709,12 @@ class OptionStrategy(OptionStrategyOrder):
       # Trigger an update of the charts
       context.statsUpdated = True
 
+      # Stop the timer
+      self.context.executionTimer.stop()
 
    def getPositionValue(self, position):
+      # Start the timer
+      self.context.executionTimer.start()
 
       # Get the context
       context = self.context
@@ -691,9 +736,9 @@ class OptionStrategy(OptionStrategyOrder):
          # Reverse the original contract side
          orderSide = -position["contractSide"][contract.Symbol]
          # Compute the Bid-Ask spread
-         bidAskSpread += self.bidAskSpread(context.Securities[contract.Symbol])
+         bidAskSpread += self.contractUtils.bidAskSpread(contract)
          # Get the latest mid-price
-         midPrice = self.midPrice(context.Securities[contract.Symbol])
+         midPrice = self.contractUtils.midPrice(contract)
          # Adjusted mid-price (including slippage)
          adjustedMidPrice = midPrice + orderSide * parameters["slippage"]
          # Total order mid-price
@@ -729,10 +774,16 @@ class OptionStrategy(OptionStrategyOrder):
       # Store the position PnL
       positionDetails["positionPnL"] = positionPnL
 
+      # Stop the timer
+      self.context.executionTimer.stop()
+
       return positionDetails
 
 
    def closePosition(self, positionDetails, stopLossFlg = False):
+
+      # Start the timer
+      self.context.executionTimer.start()
 
       # Get the context
       context = self.context
@@ -847,8 +898,12 @@ class OptionStrategy(OptionStrategyOrder):
                                        , "limitOrderPrice": limitOrderPrice
                                        }
 
+      # Stop the timer
+      self.context.executionTimer.stop()
 
    def managePositions(self):
+      # Start the timer
+      self.context.executionTimer.start()
 
       # Get the context
       context = self.context
@@ -982,4 +1037,7 @@ class OptionStrategy(OptionStrategyOrder):
                ### if context.Time > position["open"]["limitOrderExpiryDttm"]
             ### No fills at all
          ### The open position has not been fully filled (this must be a Limit order)
+         
+      # Stop the timer
+      self.context.executionTimer.stop()
 
