@@ -39,6 +39,8 @@ class OptionStrategyOrder:
       , "dteWindow": 7
       , "dteThreshold": 21
       , "forceDteThreshold": False
+      , "ditThreshold": None
+      , "forceDitThreshold": False
       # Credit Targeting: either using a fixed credit amount (targetPremium) or a dynamic credit (percentage of Net Liquidity)
       , "targetPremiumPct": None
       , "targetPremium": None
@@ -94,13 +96,15 @@ class OptionStrategyOrder:
    #    - maxOrderQuantity: (Optional) Caps the number of contracts that are bought/sold (Default: 1). 
    #         If targetPremium == None  -> This is the number of contracts bought/sold.
    #         If targetPremium != None  -> The order is executed only if the number of contracts required to reach the target credit/debit does not exceed the maxOrderQuantity
-   def __init__(self, context, name = None, **kwargs):
+   def __init__(self, context, name = None, nameTag = None, **kwargs):
       # Set the context (QCAlgorithm object)
       self.context = context
       # Set default name (use the class name) if no value has been provided 
       name = name or type(self).__name__
       # Set the Strategy Name
       self.name = name
+      # Set the Strategy Name (optional)
+      self.nameTag = nameTag or name
       # Set the logger
       self.logger = Logger(context, className = type(self).__name__, logLevel = context.logLevel)
       # Initialize the BSM pricing model
@@ -119,6 +123,11 @@ class OptionStrategyOrder:
       # Now merge the dictionary with any kwargs parameters that might have been specified directly with the constructor (kwargs takes precedence)
       self.parameters.update(kwargs)
 
+      # Determine what is the last trading day of the backtest
+      self.endOfBacktestCutoffDttm = None
+      if hasattr(context, "EndDate") and context.EndDate != None:
+         self.endOfBacktestCutoffDttm = datetime.combine(self.lastTradingDay(context.EndDate), self.parameters["marketCloseCutoffTime"])
+      
       # Create dictionary to keep track of all the open positions related to this strategy
       self.openPositions = {}
       # Create dictionary to keep track of all the working orders
@@ -168,13 +177,43 @@ class OptionStrategyOrder:
       lastDay = list(tradingCalendar.GetDaysByType(TradingDayType.BusinessDay, expiry - timedelta(days = 20), expiry))[-1].Date
       return lastDay
 
+   def isDuplicateOrder(self, contracts, sides):
+      # Loop through all working orders of this strategy
+      for orderTag in list(self.workingOrders):
+         # Get the current working order
+         workingOrder = self.workingOrders.get(orderTag)
+         # Check if the number of contracts of this working order is the same as the number of contracts in the input list
+         if workingOrder and len(workingOrder) == len(contracts):
+            # Initialize the isDuplicate flag. Assume it's duplicate unless we find a mismatch
+            isDuplicate = True
+            # Loop through each pair (contract, side)
+            for contract, side in zip(contracts, sides):
+               # Check for a mismatch
+               if (contract.Symbol not in workingOrder # we can't find this contract
+                   or workingOrder[contract.Symbol]["orderSide"] != side # Found the contract but it's on a different side (Sell/Buy)
+                   or workingOrder[contract.Symbol]["expiryStr"] != contract.Expiry.strftime("%Y-%m-%d") # Found the contract but it's on a different Expiry
+                   ):
+                  # It's not a duplicate. Brake this innermost loop 
+                  isDuplicate = False
+                  break
+            # Exit if we found a duplicate
+            if isDuplicate:
+               return isDuplicate
+
+      # If we got this far, there are no duplicates
+      return False
+      
    # Create dictionary with the details of the order to be submitted
    def getOrderDetails(self, contracts, sides, strategy, sell = True, strategyId = None, expiry = None, sidesDesc = None):
 
       # Exit if there are no contracts to process
-      if contracts == None or len(contracts) == 0:
+      if not contracts:
          return
 
+      # Exit if we already have a working order for the same set of contracts and sides
+      if self.isDuplicateOrder(contracts, sides):
+         return
+      
       # Get the context
       context = self.context
       # Get the strategy parameters

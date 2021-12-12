@@ -108,11 +108,17 @@ class StrategyBacktest(QCAlgorithm):
       
       # DTE Threshold. This is ignored if self.dte < self.dteThreshold
       self.dteThreshold = None
+      # DIT Threshold. This is ignored if self.dte < self.ditThreshold
+      self.ditThreshold = None
       
       # Controls what happens when an open position reaches/crosses the dteThreshold ( -> DTE(openPosition) <= dteThreshold)
       # - If True, the position is closed as soon as the dteThreshold is reached, regardless of whether the position is profitable or not
       # - If False, once the dteThreshold is reached, the position is closed as soon as it is profitable
       self.forceDteThreshold = False
+      # Controls what happens when an open position reaches/crosses the ditThreshold ( -> DIT(openPosition) >= ditThreshold)
+      # - If True, the position is closed as soon as the ditThreshold is reached, regardless of whether the position is profitable or not
+      # - If False, once the ditThreshold is reached, the position is closed as soon as it is profitable
+      self.forceDitThreshold = False
             
       # Maximum number of open positions at any given time
       self.maxActivePositions = 20
@@ -315,6 +321,9 @@ class StrategyBacktest(QCAlgorithm):
       # Number of currently active positions
       self.currentActivePositions = 0
       
+      # Number of current working orders to open
+      self.currentWorkingOrdersToOpen = 0
+      
       # Initialize the dictionary to keep track of all positions
       self.allPositions = {}
       
@@ -512,7 +521,7 @@ class StrategyBacktest(QCAlgorithm):
          return
 
       # Do not open any new positions if we have reached the maximum
-      if self.currentActivePositions >= self.maxActivePositions:
+      if (self.currentActivePositions + self.currentWorkingOrdersToOpen) >= self.maxActivePositions:
          return
       
       # Get the option chain

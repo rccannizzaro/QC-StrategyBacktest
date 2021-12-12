@@ -69,16 +69,16 @@ class OptionStrategy(OptionStrategyOrder):
       
       # Get the DTE of the last closed position
       lastClosedDte = None
+      lastClosedOrderTag = None
       if self.recentlyClosedDTE:
          while(self.recentlyClosedDTE):
             # Pop the oldest entry in the list (FIFO)
-            lastClosedDte = self.recentlyClosedDTE.pop(0)
-            if lastClosedDte >= minDte:
+            lastClosedTradeInfo = self.recentlyClosedDTE.pop(0)
+            if lastClosedTradeInfo["closeDte"] >= minDte:
+               lastClosedDte = lastClosedTradeInfo["closeDte"]
+               lastClosedOrderTag = lastClosedTradeInfo["orderTag"]
                # We got a good entry, get out of the loop
                break
-            else:
-               # Reset the value for the next iteration
-               lastClosedDte = None
 
       # Check if we need to do dynamic DTE selection
       if dynamicDTESelection and lastClosedDte != None:
@@ -106,7 +106,7 @@ class OptionStrategy(OptionStrategyOrder):
          # Call the getOrder method of the class implementing OptionStrategy 
          order = self.getOrder(filteredChain)
          # Execute the order
-         self.openPosition(order)
+         self.openPosition(order, linkedOrderTag = lastClosedOrderTag)
 
       # Stop the timer
       self.context.executionTimer.stop()
@@ -137,7 +137,7 @@ class OptionStrategy(OptionStrategyOrder):
 
 
    # Open a position based on the order details (as returned by getOrderDetails)
-   def openPosition(self, order):
+   def openPosition(self, order, linkedOrderTag = None):
 
       # Exit if there is no order to process
       if order == None:
@@ -220,11 +220,15 @@ class OptionStrategy(OptionStrategyOrder):
       position = {"orderId"                 : orderId
                   , "orderTag"              : orderTag
                   , "Strategy"              : self.name
+                  , "StrategyTag"           : self.nameTag
                   , "expiryStr"             : expiryStr
+                  , "linkedOrderTag"        : linkedOrderTag
                   , "openDttm"              : currentDttm
                   , "openDt"                : currentDttm.strftime("%Y-%m-%d")
                   , "openDTE"               : (expiry.date() - currentDttm.date()).days
                   , "closeDTE"              : float("NaN")
+                  , "DIT"                   : float("NaN")
+                  , "closeReason"           : ""
                   , "limitOrder"            : useLimitOrders
                   , "targetPremium"         : targetPremium
                   , "orderQuantity"         : orderQuantity
@@ -299,6 +303,7 @@ class OptionStrategy(OptionStrategyOrder):
 
       # Keep track of all the working orders
       self.workingOrders[orderTag] = {}
+      context.currentWorkingOrdersToOpen += 1
       # Create the orders
       for contract in contracts:
          # Subscribe to the option contract data feed
@@ -311,6 +316,7 @@ class OptionStrategy(OptionStrategyOrder):
          # Map each contract to the openPosition dictionary (key: expiryStr) 
          self.workingOrders[orderTag][contract.Symbol] = {"positionKey": positionKey
                                                           , "orderId": orderId
+                                                          , "orderSide": orderSide
                                                           , "expiryStr" : expiryStr
                                                           , "orderType": "open"
                                                           , "fills": 0
@@ -518,7 +524,7 @@ class OptionStrategy(OptionStrategyOrder):
       # Get the order tag. Remove any warning text that might have been added in case of Fills at Stale Price
       orderTag = re.sub(" - Warning.*", "", order.Tag)
 
-      # Get the woring order (if available)
+      # Get the working order (if available)
       workingOrder = self.workingOrders.get(orderTag)
       # Exit if this order tag is not in the list of open orders.
       if workingOrder == None:
@@ -594,6 +600,8 @@ class OptionStrategy(OptionStrategyOrder):
       # Check if all legs have been filled
       if openPosition[orderType]["fills"] == Nlegs*positionQuantity:
          openPosition[orderType]["filled"] = True
+         # Remove the working order now that it has been filled
+         self.workingOrders.pop(orderTag)
          # Set the time when the full order was filled
          bookPosition[orderType + "FilledDttm"] = context.Time
          # Record the order mid price
@@ -604,6 +612,8 @@ class OptionStrategy(OptionStrategyOrder):
             context.statsUpdated = True
             # Increment the counter of active positions
             context.currentActivePositions += 1
+            # Decrease the counter for the working orders to open
+            context.currentWorkingOrdersToOpen -= 1
             # Store the credit received (needed to determine the stop loss): value is per share (divided by 100)
             openPosition[orderType]["premium"] = bookPosition["openPremium"] / 100
 
@@ -622,8 +632,10 @@ class OptionStrategy(OptionStrategyOrder):
          
          # Compute the DTE at the time of closing the position
          closeDte = (contract.Expiry.date() - context.Time.date()).days
-         # Add this DTE to the FIFO list
-         self.recentlyClosedDTE.append(closeDte)
+         # Collect closing trade info
+         closeTradeInfo = {"orderTag": orderTag, "closeDte": closeDte}
+         # Add this trade info to the FIFO list
+         self.recentlyClosedDTE.append(closeTradeInfo)
 
          # ###########################
          # Collect Performance metrics
@@ -780,7 +792,7 @@ class OptionStrategy(OptionStrategyOrder):
       return positionDetails
 
 
-   def closePosition(self, positionDetails, stopLossFlg = False):
+   def closePosition(self, positionDetails, closeReason, stopLossFlg = False):
 
       # Start the timer
       self.context.executionTimer.start()
@@ -805,6 +817,8 @@ class OptionStrategy(OptionStrategyOrder):
 
       # Get the details currently open position 
       openPosition = self.openPositions[positionKey]
+      # Get the book position
+      bookPosition = context.allPositions[orderId]
       # Extract the expiry date
       expiry = openPosition["expiry"]
       # Get the last trading day before expiration
@@ -846,23 +860,27 @@ class OptionStrategy(OptionStrategyOrder):
       openPosition["close"]["limitOrderExpiryDttm"] = limitOrderExpiryDttm
 
       # Set the timestamp when the closing order is created
-      context.allPositions[orderId]["closeDttm"] = context.Time
+      bookPosition["closeDttm"] = context.Time
       # Set the date when the closing order is created
-      context.allPositions[orderId]["closeDt"] = context.Time.strftime("%Y-%m-%d")
+      bookPosition["closeDt"] = context.Time.strftime("%Y-%m-%d")
       # Set the price of the underlying at the time of submitting the order to close
-      context.allPositions[orderId]["underlyingPriceAtOrderClose"] = priceAtClose
+      bookPosition["underlyingPriceAtOrderClose"] = priceAtClose
       # Set the price of the underlying at the time of submitting the order to close:
       # - This is the same as underlyingPriceAtOrderClose in case of Market Orders
       # - In case of Limit orders, this is the actual price of the underlying at the time when the Limit Order was triggered (price is updated later by the manageLimitOrders method)      
-      context.allPositions[orderId]["underlyingPriceAtClose"] = priceAtClose
+      bookPosition["underlyingPriceAtClose"] = priceAtClose
       # Set the mid-price of the position at the time of closing
-      context.allPositions[orderId]["closeOrderMidPrice"] = orderMidPrice
-      context.allPositions[orderId]["closeOrderMidPrice.Min"] = orderMidPrice
-      context.allPositions[orderId]["closeOrderMidPrice.Max"] = orderMidPrice
+      bookPosition["closeOrderMidPrice"] = orderMidPrice
+      bookPosition["closeOrderMidPrice.Min"] = orderMidPrice
+      bookPosition["closeOrderMidPrice.Max"] = orderMidPrice
       # Set the Limit Order price of the position at the time of closing
-      context.allPositions[orderId]["closeOrderLimitPrice"] = limitOrderPrice
+      bookPosition["closeOrderLimitPrice"] = limitOrderPrice
       # Set the close DTE
-      context.allPositions[orderId]["closeDTE"] = (openPosition["expiry"].date() - context.Time.date()).days
+      bookPosition["closeDTE"] = (openPosition["expiry"].date() - context.Time.date()).days
+      # Set the Days in Trade
+      bookPosition["DIT"] = (context.Time.date() - bookPosition["openFilledDttm"].date()).days
+      # Set the close reason
+      bookPosition["closeReason"] = closeReason
 
       if useMarketOrders:
          # Log the parameters used to validate the order
@@ -921,19 +939,24 @@ class OptionStrategy(OptionStrategyOrder):
 
          # Get the position
          position = self.openPositions[positionKey]
+         # Get the order id
+         orderId = position["orderId"]
          # Get the order tag
          orderTag = position["orderTag"]
+         # Get the book position
+         bookPosition = context.allPositions[orderId]
          # How many days to expiration are left for this position
          currentDte = (position["expiry"].date() - context.Time.date()).days
 
-         # Get the order id
-         orderId = position["orderId"]
 
          # Check if this is a fully filled position
          if position["open"]["filled"] == True:
 
+            # How many days has this position been in trade for
+            currentDit = (context.Time.date() - bookPosition["openFilledDttm"].date()).days
+
             # Check if we have any pending working orders to close
-            if len(self.workingOrders[orderTag]) > 0:
+            if self.workingOrders.get(orderTag):
 
                # Check if we have a partial fill
                if position["close"]["fills"] > 0:
@@ -945,8 +968,9 @@ class OptionStrategy(OptionStrategyOrder):
                      # Remove the order from the self.limitOrders dictionary (make sure this order has not been removed in the meantime by the earlier call to manageLimitOrders)
                      if orderTag in self.limitOrders:
                         self.limitOrders.pop(orderTag)
-                     # Reset the order from the self.workingOrders dictionary
-                     self.workingOrders[orderTag] = {}
+                     # Remove the order from the self.workingOrders dictionary
+                     if orderTag in self.workingOrders:
+                        self.workingOrders.pop(orderTag)
                   ### if context.Time > position["close"]["limitOrderExpiryDttm"]
                ### No fills at all
             else: # There are no orders to close
@@ -985,33 +1009,86 @@ class OptionStrategy(OptionStrategyOrder):
                if positionPnL == None:
                   return
 
-               # Check if we've hit the stop loss threshold
-               stopLossFlg = netMaxLoss <= positionPnL <= stopLoss
-
-               bookPosition = context.allPositions[orderId]
                # Keep track of the P&L range throughout the life of the position
                bookPosition["P&L.Min"] = min(bookPosition["P&L.Min"], 100*positionPnL)
                bookPosition["P&L.Max"] = max(bookPosition["P&L.Max"], 100*positionPnL)
-               
+
                # Update the stats of each contract
                if parameters["includeLegDetails"] and context.Time.minute % parameters["legDatailsUpdateFrequency"] == 0:
                   for contract in position["contracts"]:
                      self.updateContractStats(bookPosition, position, contract)
 
+
+               # Initialize the closeReason
+               closeReason = None
+               
+               # Check if we've hit the stop loss threshold
+               stopLossFlg = netMaxLoss <= positionPnL <= stopLoss
+               if stopLossFlg:
+                  closeReason = "Stop Loss trigger"
+                  
+               # Check if we hit the profit target
+               profitTargetFlg = positionPnL >= targetProfit
+               if profitTargetFlg:
+                  closeReason = "Profit target"
+
+               hardDitStopFlg = False
+               softDitStopFlg = False
+               # Check for DTE stop
+               if (parameters["ditThreshold"] != None # The dteThreshold has been specified
+                   and parameters["dte"] > parameters["ditThreshold"] # We are using the dteThreshold only if the open DTE was larger than the threshold
+                   and currentDit >= parameters["ditThreshold"] # We have reached the DTE threshold
+                   ):
+                  # Check if this is a hard DTE cutoff
+                  if parameters["forceDitThreshold"] == True:
+                     hardDitStopFlg = True
+                     closeReason = closeReason or "Hard DIT cutoff"
+                  # Check if this is a soft DTE cutoff
+                  elif positionPnL >= 0:
+                     softDitStopFlg = True
+                     closeReason = closeReason or "Soft DIT cutoff"
+
+               hardDteStopFlg = False
+               softDteStopFlg = False
+               # Check for DTE stop
+               if (parameters["dteThreshold"] != None # The dteThreshold has been specified
+                   and parameters["dte"] > parameters["dteThreshold"] # We are using the dteThreshold only if the open DTE was larger than the threshold
+                   and currentDte <= parameters["dteThreshold"] # We have reached the DTE threshold
+                   ):
+                  # Check if this is a hard DTE cutoff
+                  if parameters["forceDteThreshold"] == True:
+                     hardDteStopFlg = True
+                     closeReason = closeReason or "Hard DTE cutoff"
+                  # Check if this is a soft DTE cutoff
+                  elif positionPnL >= 0:
+                     softDteStopFlg = True
+                     closeReason = closeReason or "Soft DTE cutoff"
+
+               # Check if this is the last trading day before expiration and we have reached the cutoff time
+               expiryCutoffFlg = context.Time > position["expiryMarketCloseCutoffDttm"]
+               if expiryCutoffFlg:
+                  closeReason = closeReason or "Expiration date cutoff"
+
+               # Check if this is the last trading day before expiration and we have reached the cutoff time
+               endOfBacktestCutoffFlg = False
+               if self.endOfBacktestCutoffDttm != None and context.Time > self.endOfBacktestCutoffDttm:
+                  endOfBacktestCutoffFlg = True
+                  closeReason = closeReason or "End of Backtest Liquidation"
+                  # Set the stopLossFlg = True to force a Market Order 
+                  stopLossFlg = True
+
                # Check if we need to close the position
-               if (positionPnL >= targetProfit # We hit the profit target
+               if (profitTargetFlg # We hit the profit target
                    or stopLossFlg # We hit the stop loss (making sure we don't exceed the max loss in case of spreads)
-                   or (parameters["dteThreshold"] != None # The dteThreshold has been specified
-                       and parameters["dte"] > parameters["dteThreshold"] # We are using the dteThreshold only if the open DTE was larger than the threshold
-                       and currentDte <= parameters["dteThreshold"] # We have reached the DTE threshold
-                       and (parameters["forceDteThreshold"] == True # The position must be closed when reaching the threshold (hard stop)
-                            or positionPnL >= 0 # Soft stop: close as soon as it is profitable
-                            ) 
-                       )
-                   or (context.Time > position["expiryMarketCloseCutoffDttm"]) # This is the last trading day before expiration, we bave reached the cutoff time
+                   or hardDteStopFlg # The position must be closed when reaching the DTE threshold (hard stop)
+                   or softDteStopFlg # Soft DTE stop: close as soon as it is profitable
+                   or hardDitStopFlg # The position must be closed when reaching the DIT threshold (hard stop)
+                   or softDitStopFlg # Soft DIT stop: close as soon as it is profitable
+                   or expiryCutoffFlg # This is the last trading day before expiration, we have reached the cutoff time
+                   or endOfBacktestCutoffFlg # This is the last trading day before the end of the backtest -> Liquidate all positions
                    ):
                   # Close the position
-                  self.closePosition(positionDetails, stopLossFlg = stopLossFlg)
+                  self.closePosition(positionDetails, closeReason, stopLossFlg = stopLossFlg)
 
          else: # The open position has not been fully filled (this must be a Limit order)
             # Check if we have a partial fill
@@ -1027,8 +1104,10 @@ class OptionStrategy(OptionStrategyOrder):
                   # Remove this position from the list of open positions
                   if positionKey in self.openPositions:
                      self.openPositions.pop(positionKey)
-                  # Reset the order from the self.workingOrders dictionary
-                  self.workingOrders[orderTag] = {}
+                  # Remove the order from the self.workingOrders dictionary
+                  if orderTag in self.workingOrders:
+                     context.currentWorkingOrdersToOpen -= 1
+                     self.workingOrders.pop(orderTag)
                   # Mark the order as being cancelled
                   context.allPositions[orderId]["orderCancelled"] = True
                   # Remove the cancelled position from the final output unless we are required to include it
