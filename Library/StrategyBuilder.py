@@ -58,10 +58,10 @@ class StrategyBuilder:
       # Sort the contracts based on how close they are to the current price of the underlying. 
       # Filter them by the selected contract type (Put/Call or both)
       sorted_contracts = sorted([contract 
-                                    for contract in filteredChain 
+                                    for contract in contracts 
                                        if self.optionTypeFilter(contract, type)
                                  ]
-                                , key = lambda x: abs(x.Strike - self.contractUtils.getUnderlyingLastPrice(x.UnderlyingLastPrice))
+                                , key = lambda x: abs(x.Strike - self.contractUtils.getUnderlyingLastPrice(x))
                                 , reverse = False
                                 )
 
@@ -259,7 +259,7 @@ class StrategyBuilder:
 
 
       deltaFilteredPuts = puts
-      deltaFilteredcalls = calls
+      deltaFilteredCalls = calls
       # Check if we need to filter by Delta
       if (fromDelta or toDelta):
          # Find the strike range for the Puts based on the From/To Delta
