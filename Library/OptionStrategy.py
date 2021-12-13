@@ -993,12 +993,16 @@ class OptionStrategy(OptionStrategyOrder):
 
                # Set the target profit amount:
                targetProfit = abs(openPremium) * parameters["profitTarget"]
-               # Set the stop loss amount
-               stopLoss = -abs(openPremium) * parameters["stopLossMultiplier"]
                # Maximum Loss (pre-computed at the time of creating the order)
                maxLoss = position["maxLoss"] * positionQuantity
                # Add the premium to compute the net loss
                netMaxLoss = maxLoss + openPremium
+               
+               stopLoss = None
+               # Check if we are using a stop loss
+               if parameters["stopLossMultiplier"] != None:
+                  # Set the stop loss amount
+                  stopLoss = -abs(openPremium) * parameters["stopLossMultiplier"]
 
                # Get the current value of the position
                positionDetails = self.getPositionValue(position)
@@ -1023,8 +1027,9 @@ class OptionStrategy(OptionStrategyOrder):
                closeReason = None
                
                # Check if we've hit the stop loss threshold
-               stopLossFlg = netMaxLoss <= positionPnL <= stopLoss
-               if stopLossFlg:
+               stopLossFlg = False
+               if stopLoss != None and netMaxLoss <= positionPnL <= stopLoss:
+                  stopLossFlg = True
                   closeReason = "Stop Loss trigger"
                   
                # Check if we hit the profit target
