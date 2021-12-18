@@ -188,10 +188,18 @@ class OptionStrategyOrder:
             isDuplicate = True
             # Loop through each pair (contract, side)
             for contract, side in zip(contracts, sides):
+               # Get the details of the contract
+               contractInfo = workingOrder.get(contract.Symbol)
+               # If we cannot find this contract then it's not a duplicate
+               if contractInfo == None:
+                  isDuplicate = False
+                  break
+               # Get the orderSide and expiryStr properties
+               orderSide = contractInfo.get("orderSide")
+               expiryStr = contractInfo.get("expiryStr")
                # Check for a mismatch
-               if (contract.Symbol not in workingOrder # we can't find this contract
-                   or workingOrder[contract.Symbol]["orderSide"] != side # Found the contract but it's on a different side (Sell/Buy)
-                   or workingOrder[contract.Symbol]["expiryStr"] != contract.Expiry.strftime("%Y-%m-%d") # Found the contract but it's on a different Expiry
+               if (orderSide != side # Found the contract but it's on a different side (Sell/Buy)
+                   or expiryStr != contract.Expiry.strftime("%Y-%m-%d") # Found the contract but it's on a different Expiry
                    ):
                   # It's not a duplicate. Brake this innermost loop 
                   isDuplicate = False
@@ -643,7 +651,7 @@ class OptionStrategyOrder:
       # Get the Put spread
       puts = self.strategyBuilder.getSpread(contracts, "Put", strike = strike, delta = delta, wingSize = putWingSize, sortByStrike = True)      
       # Get the Call spread with the same strike as the first leg of the Put spread
-      calls = self.strategyBuilder.getSpread(contracts, "Call", strike = puts[0].Strike, wingSize = callWingSize)
+      calls = self.strategyBuilder.getSpread(contracts, "Call", strike = puts[-1].Strike, wingSize = callWingSize)
 
       # Collect all legs
       legs = puts + calls
