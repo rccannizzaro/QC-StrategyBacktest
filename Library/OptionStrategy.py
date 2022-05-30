@@ -1,3 +1,7 @@
+#region imports
+from AlgorithmImports import *
+#endregion
+
 ########################################################################################
 #                                                                                      #
 # Licensed under the Apache License, Version 2.0 (the "License");                      #
@@ -16,7 +20,6 @@ import re
 import numpy as np
 from Logger import *
 from OptionStrategyOrder import *
-from ContractUtils import *
 
 class OptionStrategy(OptionStrategyOrder):
 
@@ -26,8 +29,6 @@ class OptionStrategy(OptionStrategyOrder):
 
       # Get the context
       context = self.context
-      # Initialize the contract utils
-      self.contractUtils = ContractUtils(context)
       # Get the strategy parameters
       parameters = self.parameters
       
@@ -46,11 +47,28 @@ class OptionStrategy(OptionStrategyOrder):
       minDte = max(0, dte - dteWindow)
       maxDte = max(0, dte)
 
+      # Get the maximum number of active positions that are allowed for this strategy
+      maxActivePositions = parameters.get("maxActivePositions")
+      
+      # Exit if we are already at full capacity
+      if (maxActivePositions != None
+          and (self.currentActivePositions + self.currentWorkingOrdersToOpen) >= maxActivePositions
+          ):
+         return
+
+      # Get the minimum time distance between consecutive trades
+      minimumTradeScheduleDistance = parameters.get("minimumTradeScheduleDistance", timedelta(hours = 0))
+      # Make sure the minimum required amount of time has passed since the last trade was opened
+      if (self.lastOpenedDttm != None 
+          and context.Time < (self.lastOpenedDttm + minimumTradeScheduleDistance)
+          ):
+         return
+         
       # Check if the epiryList was specified as an input
-      if expiryList == None:
+      if expiryList == None or dte != context.dte or dteWindow != context.dteWindow:
          # List of expiry dates, sorted in reverse order
          expiryList = sorted(set([contract.Expiry for contract in chain
-                                    if minDte <= (contract.Expiry.date() - self.Time.date()).days <= maxDte
+                                    if minDte <= (contract.Expiry.date() - context.Time.date()).days <= maxDte
                                   ]
                                  )
                              , reverse = True
@@ -151,6 +169,9 @@ class OptionStrategy(OptionStrategyOrder):
       # Get the strategy parameters
       parameters = self.parameters
 
+      # Track the details of each leg? Only if includeLegDetails = True
+      trackLegDetails = parameters["trackLegDetails"] and parameters["includeLegDetails"]
+      
       # Get the list of contracts
       contracts = order["contracts"]
       # Exit if there are no contracts
@@ -169,6 +190,7 @@ class OptionStrategy(OptionStrategyOrder):
       # Extract order details. More readable than navigating the order dictionary..
       strategyId = order["strategyId"]
       contractSide = order["contractSide"]
+      sides = order["sides"]
       sidesDesc = order["sidesDesc"]
       midPrices = order["midPrices"]
       strikes = order["strikes"]
@@ -200,7 +222,7 @@ class OptionStrategy(OptionStrategyOrder):
          return
 
       # Get the current price of the underlying
-      underlyingPrice = contracts[0].UnderlyingLastPrice
+      underlyingPrice = self.contractUtils.getUnderlyingLastPrice(contracts[0])
 
       # Get the Order Id and add it to the order dictionary
       orderId = self.getNextOrderId()
@@ -215,6 +237,14 @@ class OptionStrategy(OptionStrategyOrder):
          positionKey = orderId
       else:
          positionKey = expiryStr
+
+      # Dictionary to keep track of the details of each leg across time
+      if trackLegDetails:
+         context.positionTracking[orderId] = {}
+         # Initialize the first record
+         positionTracking = {"orderId": orderId
+                             , "Time": currentDttm
+                             }
 
       # Position dictionary. Used to keep track of the position and to report the results (will be converted into a flat csv)
       position = {"orderId"                 : orderId
@@ -236,16 +266,20 @@ class OptionStrategy(OptionStrategyOrder):
                   , "openOrderMidPrice"     : orderMidPrice
                   , "openOrderMidPrice.Min" : orderMidPrice
                   , "openOrderMidPrice.Max" : orderMidPrice
+                  , "openOrderBidAskSpread" : bidAskSpread
                   , "openOrderLimitPrice"   : limitOrderPrice
                   , "closeOrderMidPrice"    : 0.0
                   , "closeOrderMidPrice.Min": 0.0
                   , "closeOrderMidPrice.Max": 0.0
+                  , "closeOrderBidAskSpread": float("NaN")
                   , "closeOrderLimitPrice"  : 0.0
                   , "openPremium"           : 0.0
                   , "closePremium"          : 0.0
                   , "P&L"                   : 0.0
                   , "P&L.Min"               : 0.0
                   , "P&L.Max"               : 0.0
+                  , "P&L.Min.DIT"           : 0.0
+                  , "P&L.Max.DIT"           : 0.0
                   , "underlyingPriceAtOrderOpen"   : underlyingPrice
                   , "underlyingPriceAtOpen"        : underlyingPrice
                   , "underlyingPriceAtOrderClose"  : float("NaN")
@@ -262,16 +296,22 @@ class OptionStrategy(OptionStrategyOrder):
          position[f"{self.name}.{key}.Strike"] = strikes[key]
 
       # Add details about the mid price, fill price and related stats 
-      for key in sidesDesc:
+      for key, side in zip(sidesDesc, sides):
+         position[f"{self.name}.{key}.Expiry"] = order["contractExpiry"][key].strftime("%Y-%m-%d")
+         position[f"{self.name}.{key}.side"] = side
+         position[f"{self.name}.{key}.openMidPrice"] = float("NaN")
+         position[f"{self.name}.{key}.closeMidPrice"] = float("NaN")
          position[f"{self.name}.{key}.openFillPrice"] = float("NaN")
          position[f"{self.name}.{key}.closeFillPrice"] = float("NaN")
-         position[f"{self.name}.{key}.midPrice"] = midPrices[key]
+         position[f"{self.name}.{key}.openBidAskSpread"] = float("NaN")
+         position[f"{self.name}.{key}.closeBidAskSpread"] = float("NaN")
          if parameters["includeLegDetails"]:
+            position[f"{self.name}.{key}.midPrice.Close"] = midPrices[key]
             position[f"{self.name}.{key}.midPrice.Min"] = midPrices[key]
             position[f"{self.name}.{key}.midPrice.Avg"] = midPrices[key]
             position[f"{self.name}.{key}.midPrice.Max"] = midPrices[key]
             position[f"{self.name}.{key}.midPrice.EMA({emaMemory})"] = midPrices[key]
-            position[f"{self.name}.{key}.PnL"] = 0.0
+            position[f"{self.name}.{key}.PnL.Close"] = 0.0
             position[f"{self.name}.{key}.PnL.Min"] = 0.0
             position[f"{self.name}.{key}.PnL.Avg"] = 0.0
             position[f"{self.name}.{key}.PnL.Max"] = 0.0
@@ -282,28 +322,40 @@ class OptionStrategy(OptionStrategyOrder):
          for key in sidesDesc:
             position[f"{self.name}.{key}.{greek.title()}"] = order[f"{greek}"][key]
             if parameters["includeLegDetails"]:
+               position[f"{self.name}.{key}.{greek.title()}.Close"] = order[f"{greek}"][key]
                position[f"{self.name}.{key}.{greek.title()}.Min"] = order[f"{greek}"][key]
                position[f"{self.name}.{key}.{greek.title()}.Avg"] = order[f"{greek}"][key]
                position[f"{self.name}.{key}.{greek.title()}.Max"] = order[f"{greek}"][key]
                position[f"{self.name}.{key}.{greek.title()}.EMA({emaMemory})"] = order[f"{greek}"][key]
-            
+      
        # Add details about the IV 
       for key in sidesDesc:
          position[f"{self.name}.{key}.IV"] = IVs[key]
+         if trackLegDetails:
+            positionTracking[f"{self.name}.{key}.IV"] = IVs[key]
          if parameters["includeLegDetails"]:
+            position[f"{self.name}.{key}.IV.Close"] = IVs[key]
             position[f"{self.name}.{key}.IV.Min"] = IVs[key]
             position[f"{self.name}.{key}.IV.Avg"] = IVs[key]
             position[f"{self.name}.{key}.IV.Max"] = IVs[key]
             position[f"{self.name}.{key}.IV.EMA({emaMemory})"] = IVs[key]
+
+      if trackLegDetails:
+         positionTracking[f"{self.name}.underlyingPrice"] = underlyingPrice
+         positionTracking[f"{self.name}.PnL"] = 0
 
       # Add this position to the global dictionary
       context.allPositions[orderId] = position
       # Add the details of this order to the openPositions dictionary.
       self.openPositions[positionKey] = order
 
+      if trackLegDetails:
+         context.positionTracking[orderId][currentDttm] = positionTracking
+         
       # Keep track of all the working orders
       self.workingOrders[orderTag] = {}
       context.currentWorkingOrdersToOpen += 1
+      self.currentWorkingOrdersToOpen += 1
       # Create the orders
       for contract in contracts:
          # Subscribe to the option contract data feed
@@ -386,7 +438,6 @@ class OptionStrategy(OptionStrategyOrder):
          # Keep track of the Limit order mid-price range
          position[f"{orderType}OrderMidPrice.Min"] = min(position[f"{orderType}OrderMidPrice.Min"], midPrice)
          position[f"{orderType}OrderMidPrice.Max"] = max(position[f"{orderType}OrderMidPrice.Max"], midPrice)
-
          
          if (# Check if we have reached the required price level
              midPrice >= limitOrderPrice
@@ -401,6 +452,8 @@ class OptionStrategy(OptionStrategyOrder):
             self.logger.debug(f" - midPrice: {midPrice}  (limitOrderPrice: {limitOrderPrice})")
             self.logger.debug(f" - bidAskSpread: {bidAskSpread}")
 
+            # Store the Bid-Ask spread at the time of executing the order
+            position[f"{orderType}OrderBidAskSpread"] = bidAskSpread
             # Store the price of the underlying at the time of submitting the Market Order
             position[f"underlyingPriceAt{orderType.title()}"] = context.Securities[context.underlyingSymbol].Close
             # Initialize the counter
@@ -431,6 +484,8 @@ class OptionStrategy(OptionStrategyOrder):
       # Get the strategy parameters
       parameters = self.parameters
       
+      orderId = openPosition["orderId"]
+      
       # Get the side of the contract at the time of opening: -1 -> Short   +1 -> Long
       contractSide = openPosition["contractSide"][contract.Symbol]
       contractSideDesc = openPosition["contractSideDesc"][contract.Symbol]
@@ -440,6 +495,8 @@ class OptionStrategy(OptionStrategyOrder):
 
       # Store the Open/Close Fill Price (if specified)
       if orderType != None:
+         bookPosition[f"{fieldPrefix}.{orderType}MidPrice"] = self.contractUtils.midPrice(contract)
+         bookPosition[f"{fieldPrefix}.{orderType}BidAskSpread"] = self.contractUtils.bidAskSpread(contract)
          bookPosition[f"{fieldPrefix}.{orderType}FillPrice"] = fillPrice
 
       # Exit if we don't need to include the details
@@ -471,7 +528,7 @@ class OptionStrategy(OptionStrategyOrder):
       # Check if the fill price is set 
       if not math.isnan(openFillPrice):
          # Compute the PnL of the contract (100 shares per contract)
-         PnL = 100 * (openFillPrice + midPrice * contractSide)
+         PnL = 100 * (openFillPrice + midPrice * np.sign(contractSide))*abs(contractSide)
          # Add the PnL to the list of variables for which we want to update the stats
          vars.append("PnL")         
          greeks["PnL"] = PnL
@@ -482,20 +539,25 @@ class OptionStrategy(OptionStrategyOrder):
          # Get the latest value from the dictionary
          fieldValue = greeks[var]
          # Special case for the PnL
-         if var == "PnL":
-            # Update the PnL value
-            bookPosition[f"{fieldName}"] = fieldValue
+         if var == "PnL" and statsUpdateCount == 2:
             # Initialize the EMA for the PnL
-            if statsUpdateCount == 2:
-               bookPosition[f"{fieldName}.EMA({emaMemory})"] = fieldValue
+            bookPosition[f"{fieldName}.EMA({emaMemory})"] = fieldValue
          # Update the Min field
          bookPosition[f"{fieldName}.Min"] = min(bookPosition[f"{fieldName}.Min"], fieldValue)
          # Update the Max field
          bookPosition[f"{fieldName}.Max"] = max(bookPosition[f"{fieldName}.Max"], fieldValue)
+         # Update the Close field (this is the most recent value of the greek)
+         bookPosition[f"{fieldName}.Close"] = fieldValue
          # Update the EMA field (IMPORTANT: this must be done before we update the Avg field!)
          bookPosition[f"{fieldName}.EMA({emaMemory})"] = emaDecay * bookPosition[f"{fieldName}.EMA({emaMemory})"] + (1-emaDecay)*fieldValue
          # Update the Avg field
          bookPosition[f"{fieldName}.Avg"] = (bookPosition[f"{fieldName}.Avg"]*(statsUpdateCount-1) + fieldValue)/statsUpdateCount
+         if parameters["trackLegDetails"] and var == "IV":
+            if context.Time not in context.positionTracking[orderId]:
+               context.positionTracking[orderId][context.Time] = {"orderId": orderId
+                                                                  , "Time": context.Time
+                                                                  }
+            context.positionTracking[orderId][context.Time][fieldName] = fieldValue
      
       # Stop the timer
       self.context.executionTimer.stop()
@@ -610,10 +672,16 @@ class OptionStrategy(OptionStrategyOrder):
          if orderType == "open":
             # Trigger an update of the charts
             context.statsUpdated = True
-            # Increment the counter of active positions
+            # Increment the global counter of active positions
             context.currentActivePositions += 1
-            # Decrease the counter for the working orders to open
+            # Decrease the global portfolio counter for the working orders to open
             context.currentWorkingOrdersToOpen -= 1
+            # Increment the internal (stategy specific) counter of active positions
+            self.currentActivePositions += 1
+            # Marks the date/time of the most recenlty opened position 
+            self.lastOpenedDttm = context.Time
+            # Decrease the internal (stategy specific) counter for the working orders to open
+            self.currentWorkingOrdersToOpen -= 1
             # Store the credit received (needed to determine the stop loss): value is per share (divided by 100)
             openPosition[orderType]["premium"] = bookPosition["openPremium"] / 100
 
@@ -627,8 +695,10 @@ class OptionStrategy(OptionStrategyOrder):
          bookPosition["P&L"] = positionPnL
          # Now we can remove the position from the self.openPositions dictionary
          removedPosition = self.openPositions.pop(positionKey)
-         # Decrement the counter of active positions
+         # Decrement the global counter of active positions
          context.currentActivePositions -= 1
+         # Decrement the internal (strategy specfic) counter of active positions
+         self.currentActivePositions -= 1
          
          # Compute the DTE at the time of closing the position
          closeDte = (contract.Expiry.date() - context.Time.date()).days
@@ -888,6 +958,8 @@ class OptionStrategy(OptionStrategyOrder):
          self.logger.debug(f" - orderQuantity: {openPosition['orderQuantity']}")
          self.logger.debug(f" - midPrice: {orderMidPrice}")
          self.logger.debug(f" - bidAskSpread: {bidAskSpread}")
+         # Store the Bid-Ask spread at the time of executing the order
+         bookPosition["closeOrderBidAskSpread"] = bidAskSpread
 
       # Submit the close orders
       self.workingOrders[orderTag] = {}
@@ -919,6 +991,42 @@ class OptionStrategy(OptionStrategyOrder):
       # Stop the timer
       self.context.executionTimer.stop()
 
+   def isStopLoss(self, openPosition, positionValue):
+      # Get the strategy parameters
+      parameters = self.parameters
+   
+      # Get the Stop Loss multiplier
+      stopLossMultiplier = parameters["stopLossMultiplier"]
+      capStopLoss = parameters["capStopLoss"]
+      
+      # Get the amount of credit received to open the position
+      openPremium = openPosition["open"]["premium"]
+      # Get the quantity used to open the position
+      positionQuantity = openPosition["orderQuantity"]
+      # Maximum Loss (pre-computed at the time of creating the order)
+      maxLoss = openPosition["maxLoss"] * positionQuantity
+      if capStopLoss:
+         # Add the premium to compute the net loss
+         netMaxLoss = maxLoss + openPremium
+      else:
+         netMaxLoss = float("-Inf")
+   
+      stopLoss = None
+      # Check if we are using a stop loss
+      if stopLossMultiplier != None:
+         # Set the stop loss amount
+         stopLoss = -abs(openPremium) * stopLossMultiplier
+         
+      # Extract the positionPnL (per share)
+      positionPnL = positionValue["positionPnL"]
+
+      # Check if we've hit the stop loss threshold
+      stopLossFlg = False
+      if stopLoss != None and netMaxLoss <= positionPnL <= stopLoss:
+         stopLossFlg = True
+   
+      return stopLossFlg
+
    def managePositions(self):
       # Start the timer
       self.context.executionTimer.start()
@@ -927,9 +1035,18 @@ class OptionStrategy(OptionStrategyOrder):
       context = self.context
       # Get the strategy parameters
       parameters = self.parameters
+      
+      managePositionFrequency = max(parameters["managePositionFrequency"], 1)
+
+      # Continue the processing only if we are at the specified schedule
+      if context.Time.minute % managePositionFrequency != 0:
+         return
 
       # Manage any Limit orders that have not been executed
       self.manageLimitOrders()
+      
+      # Flag to control whether we need to manage the limit orders again at the end of the loop below
+      manageLimitOrders = False
 
       # Loop through all open positions
       for positionKey in list(self.openPositions):
@@ -974,10 +1091,6 @@ class OptionStrategy(OptionStrategyOrder):
                   ### if context.Time > position["close"]["limitOrderExpiryDttm"]
                ### No fills at all
             else: # There are no orders to close
-               # Get the amount of credit received to open the position
-               openPremium = position["open"]["premium"]
-               # Get the quantity used to open the position
-               positionQuantity = position["orderQuantity"]
 
                # Possible Scenarios:
                #   - Credit Strategy: 
@@ -991,19 +1104,15 @@ class OptionStrategy(OptionStrategyOrder):
                #        -> stopLossMultiplier <= 1
                #        -> maxLoss = openPremium
 
-               # Set the target profit amount:
-               targetProfit = abs(openPremium) * parameters["profitTarget"]
-               # Maximum Loss (pre-computed at the time of creating the order)
-               maxLoss = position["maxLoss"] * positionQuantity
-               # Add the premium to compute the net loss
-               netMaxLoss = maxLoss + openPremium
+               # Get the amount of credit received to open the position
+               openPremium = position["open"]["premium"]
                
-               stopLoss = None
-               # Check if we are using a stop loss
-               if parameters["stopLossMultiplier"] != None:
-                  # Set the stop loss amount
-                  stopLoss = -abs(openPremium) * parameters["stopLossMultiplier"]
-
+               # Get the target profit amount (if it has been set at the time of creating the order)
+               targetProfit = position.get("targetProfit", None)
+               # Set the target profit amount if the above step returned no value
+               if targetProfit == None and parameters["profitTarget"] != None:
+                  targetProfit = abs(openPremium) * parameters["profitTarget"]
+               
                # Get the current value of the position
                positionDetails = self.getPositionValue(position)
                # Extract the positionPnL (per share)
@@ -1013,28 +1122,26 @@ class OptionStrategy(OptionStrategyOrder):
                if positionPnL == None:
                   return
 
-               # Keep track of the P&L range throughout the life of the position
-               bookPosition["P&L.Min"] = min(bookPosition["P&L.Min"], 100*positionPnL)
-               bookPosition["P&L.Max"] = max(bookPosition["P&L.Max"], 100*positionPnL)
-
-               # Update the stats of each contract
-               if parameters["includeLegDetails"] and context.Time.minute % parameters["legDatailsUpdateFrequency"] == 0:
-                  for contract in position["contracts"]:
-                     self.updateContractStats(bookPosition, position, contract)
-
+               # Keep track of the P&L range throughout the life of the position (mark the DIT of when the Min/Max PnL occurs)
+               if 100*positionPnL < bookPosition["P&L.Max"]:
+                  bookPosition["P&L.Min.DIT"] = currentDit
+                  bookPosition["P&L.Min"] = min(bookPosition["P&L.Min"], 100*positionPnL)
+               if 100*positionPnL > bookPosition["P&L.Max"]:
+                  bookPosition["P&L.Max.DIT"] = currentDit
+                  bookPosition["P&L.Max"] = max(bookPosition["P&L.Max"], 100*positionPnL)
 
                # Initialize the closeReason
                closeReason = None
                
                # Check if we've hit the stop loss threshold
-               stopLossFlg = False
-               if stopLoss != None and netMaxLoss <= positionPnL <= stopLoss:
-                  stopLossFlg = True
+               stopLossFlg = self.isStopLoss(position, positionDetails)
+               if stopLossFlg:
                   closeReason = "Stop Loss trigger"
                   
                # Check if we hit the profit target
-               profitTargetFlg = positionPnL >= targetProfit
-               if profitTargetFlg:
+               profitTargetFlg = False
+               if targetProfit != None and positionPnL >= targetProfit:
+                  profitTargetFlg = True
                   closeReason = "Profit target"
 
                hardDitStopFlg = False
@@ -1045,7 +1152,9 @@ class OptionStrategy(OptionStrategyOrder):
                    and currentDit >= parameters["ditThreshold"] # We have reached the DTE threshold
                    ):
                   # Check if this is a hard DTE cutoff
-                  if parameters["forceDitThreshold"] == True:
+                  if (parameters["forceDitThreshold"] == True
+                      or (parameters["hardDitThreshold"] != None and currentDit >= parameters["hardDitThreshold"])
+                      ):
                      hardDitStopFlg = True
                      closeReason = closeReason or "Hard DIT cutoff"
                   # Check if this is a soft DTE cutoff
@@ -1070,17 +1179,26 @@ class OptionStrategy(OptionStrategyOrder):
                      closeReason = closeReason or "Soft DTE cutoff"
 
                # Check if this is the last trading day before expiration and we have reached the cutoff time
-               expiryCutoffFlg = context.Time > position["expiryMarketCloseCutoffDttm"]
+               expiryCutoffFlg = context.Time >= position["expiryMarketCloseCutoffDttm"]
                if expiryCutoffFlg:
                   closeReason = closeReason or "Expiration date cutoff"
 
                # Check if this is the last trading day before expiration and we have reached the cutoff time
                endOfBacktestCutoffFlg = False
-               if self.endOfBacktestCutoffDttm != None and context.Time > self.endOfBacktestCutoffDttm:
+               if self.endOfBacktestCutoffDttm != None and context.Time >= self.endOfBacktestCutoffDttm:
                   endOfBacktestCutoffFlg = True
                   closeReason = closeReason or "End of Backtest Liquidation"
                   # Set the stopLossFlg = True to force a Market Order 
                   stopLossFlg = True
+
+               # Update the stats of each contract
+               if parameters["includeLegDetails"] and context.Time.minute % parameters["legDatailsUpdateFrequency"] == 0:
+                  for contract in position["contracts"]:
+                     self.updateContractStats(bookPosition, position, contract)
+                  if parameters["trackLegDetails"]:
+                     underlyingPrice = context.GetLastKnownPrice(context.Securities[context.underlyingSymbol]).Price
+                     context.positionTracking[orderId][context.Time][f"{self.name}.underlyingPrice"] = underlyingPrice
+                     context.positionTracking[orderId][context.Time][f"{self.name}.PnL"] = positionPnL
 
                # Check if we need to close the position
                if (profitTargetFlg # We hit the profit target
@@ -1094,6 +1212,8 @@ class OptionStrategy(OptionStrategyOrder):
                    ):
                   # Close the position
                   self.closePosition(positionDetails, closeReason, stopLossFlg = stopLossFlg)
+                  # Need to manage any Limit orders that have been added
+                  manageLimitOrders = True
 
          else: # The open position has not been fully filled (this must be a Limit order)
             # Check if we have a partial fill
@@ -1112,6 +1232,7 @@ class OptionStrategy(OptionStrategyOrder):
                   # Remove the order from the self.workingOrders dictionary
                   if orderTag in self.workingOrders:
                      context.currentWorkingOrdersToOpen -= 1
+                     self.currentWorkingOrdersToOpen -= 1
                      self.workingOrders.pop(orderTag)
                   # Mark the order as being cancelled
                   context.allPositions[orderId]["orderCancelled"] = True
@@ -1121,7 +1242,11 @@ class OptionStrategy(OptionStrategyOrder):
                ### if context.Time > position["open"]["limitOrderExpiryDttm"]
             ### No fills at all
          ### The open position has not been fully filled (this must be a Limit order)
-         
+      
+      # Manage any Limit orders that have been created in the meantime
+      if manageLimitOrders:
+         self.manageLimitOrders()
+      
       # Stop the timer
       self.context.executionTimer.stop()
 

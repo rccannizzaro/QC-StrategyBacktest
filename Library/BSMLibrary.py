@@ -1,3 +1,7 @@
+#region imports
+from AlgorithmImports import *
+#endregion
+
 ########################################################################################
 #                                                                                      #
 # Licensed under the Apache License, Version 2.0 (the "License");                      #
@@ -31,25 +35,31 @@ class BSM:
       # Set the IR 
       self.riskFreeRate = context.riskFreeRate
       
-   def isITM(self, contract):
+   def isITM(self, contract, spotPrice = None):
+      # Get the current price of the underlying unless otherwise specified
+      if spotPrice == None:
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+   
       if contract.Right == OptionRight.Call:
          # A Call option is in the money if the underlying price is above the strike price
-         return contract.Strike < self.contractUtils.getUnderlyingLastPrice(contract)
+         return contract.Strike < spotPrice
       else:
          # A Put option is in the money if the underlying price is below the strike price
-         return self.contractUtils.getUnderlyingLastPrice(contract) < contract.Strike
+         return spotPrice < contract.Strike
          
-   def bsmD1(self, contract, sigma, tau = None, ir = None):
+   def bsmD1(self, contract, sigma, tau = None, ir = None, spotPrice = None, atTime = None):
       # Get the DTE as a fraction of a year
       if tau == None:
-         tau = self.optionTau(contract)
+         tau = self.optionTau(contract, atTime = atTime)
 
       # Use the risk free rate unless otherwise specified
       if ir == None:
          ir = self.riskFreeRate
 
-      # Spot price (mid-price)
-      spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+      # Get the current price of the underlying unless otherwise specified
+      if spotPrice == None:
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+
       # Strike price
       strikePrice = contract.Strike
       
@@ -59,7 +69,7 @@ class BSM:
       if tau == 0 or sigma == 0:
          # Set the sign based on whether it is a Call (+1) or a Put (-1)
          sign = 2*int(contract.Right == OptionRight.Call)-1
-         if(self.isITM(contract)):
+         if(self.isITM(contract, spotPrice = spotPrice)):
             # Deep ITM options:
             #  - Call: d1 = Inf -> Delta = Norm.CDF(d1) = 1
             #  - Put: d1 = -Inf -> Delta = -Norm.CDF(-d1) = -1
@@ -75,25 +85,27 @@ class BSM:
 
 
       
-   def bsmD2(self, contract, sigma, tau = None, d1 = None, ir = None):
+   def bsmD2(self, contract, sigma, tau = None, d1 = None, ir = None, spotPrice = None, atTime = None):
 
       # Get the DTE as a fraction of a year
       if tau == None:
-         tau = self.optionTau(contract)
+         tau = self.optionTau(contract, atTime = atTime)
 
       if d1 == None:
-         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
+         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir, spotPrice = spotPrice)
    
       # Compute D2
       d2 = d1 - sigma * np.sqrt(tau)
       return d2
    
    # Compute the DTE as a time fraction of the year
-   def optionTau(self, contract):
+   def optionTau(self, contract, atTime = None):
+      if atTime == None:
+         atTime = self.context.Time
       # Get the expiration date and add 16 hours to the market close
       expiryDttm = contract.Expiry + timedelta(hours = 16)
       # Time until market close
-      timeDiff = expiryDttm - self.context.Time
+      timeDiff = expiryDttm - atTime
       # Days to expiration: use the fraction of minutes until market close in case of 0-DTE (390 minutes = 6.5h -> from 9:30 to 16:00)
       dte = max(0, timeDiff.days, timeDiff.seconds/(60.0*390.0))
       # DTE as a fraction of a year
@@ -101,18 +113,19 @@ class BSM:
       return tau
 
    # Pricing of a European option based on the Black Scholes Merton model (without dividends)
-   def bsmPrice(self, contract, sigma, tau = None, ir = None):
+   def bsmPrice(self, contract, sigma, tau = None, ir = None, spotPrice = None, atTime = None):
       
       # Get the DTE as a fraction of a year
       if tau == None:
-         tau = self.optionTau(contract)
+         tau = self.optionTau(contract, atTime = atTime)
       
-      # Spot price (mid-price)
-      spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+      # Get the current price of the underlying unless otherwise specified
+      if spotPrice == None:
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
       # Compute D1
-      d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
+      d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir, spotPrice = spotPrice)
       # Compute D2
-      d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir)
+      d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
       # X*e^(-r*tau)
       Xert = contract.Strike * np.exp(-self.riskFreeRate*tau)
 
@@ -128,18 +141,19 @@ class BSM:
 
 
    # Compute the Theta of an option
-   def bsmTheta(self, contract, sigma, tau = None, d1 = None, d2 = None, ir = None):
+   def bsmTheta(self, contract, sigma, tau = None, d1 = None, d2 = None, ir = None, spotPrice = None, atTime = None):
       # Get the DTE as a fraction of a year
       if tau == None:
-         tau = self.optionTau(contract)
-      # Spot price (mid-price)
-      spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+         tau = self.optionTau(contract, atTime = atTime)
+      # Get the current price of the underlying unless otherwise specified
+      if spotPrice == None:
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
       # Compute D1
       if d1 == None:
-         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
+         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir, spotPrice = spotPrice)
       # Compute D2
       if d2 == None:
-         d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir)
+         d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
       # -S*N'(d1)*sigma/(2*sqrt(tau))
       SNs = -(spotPrice * norm.pdf(d1) * sigma) / (2.0 * np.sqrt(tau))
       # r*X*e^(-r*tau)
@@ -153,18 +167,19 @@ class BSM:
 
 
    # Compute the Theta of an option
-   def bsmRho(self, contract, sigma, tau = None, d1 = None, d2 = None, ir = None):
+   def bsmRho(self, contract, sigma, tau = None, d1 = None, d2 = None, ir = None, spotPrice = None, atTime = None):
       # Get the DTE as a fraction of a year
       if tau == None:
-         tau = self.optionTau(contract)
-      # Spot price (mid-price)
-      spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+         tau = self.optionTau(contract, atTime = atTime)
+      # Get the current price of the underlying unless otherwise specified
+      if spotPrice == None:
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
       # Compute D1
       if d1 == None:
-         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
+         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir, spotPrice = spotPrice)
       # Compute D2
       if d2 == None:
-         d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir)
+         d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
       # tau*X*e^(-r*tau)
       tXert = tau * self.riskFreeRate * contract.Strike * np.exp(-self.riskFreeRate*tau)
       # Compute Theta
@@ -176,15 +191,16 @@ class BSM:
 
 
    # Compute the Gamma of an option
-   def bsmGamma(self, contract, sigma, tau = None, d1 = None, ir = None):
-      # Spot price (mid-price)
-      spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+   def bsmGamma(self, contract, sigma, tau = None, d1 = None, ir = None, spotPrice = None, atTime = None):
       # Get the DTE as a fraction of a year
       if tau == None:
-         tau = self.optionTau(contract)
+         tau = self.optionTau(contract, atTime = atTime)
+      # Get the current price of the underlying unless otherwise specified
+      if spotPrice == None:
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
       # Compute D1
       if d1 == None:
-         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
+         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir, spotPrice = spotPrice)
       # Compute Gamma
       if(sigma == 0 or tau == 0):
          gamma = float('inf')
@@ -195,33 +211,35 @@ class BSM:
 
    
    # Compute the Vega of an option
-   def bsmVega(self, contract, sigma, tau = None, d1 = None, ir = None):
-      # Spot price (mid-price)
-      spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+   def bsmVega(self, contract, sigma, tau = None, d1 = None, ir = None, spotPrice = None, atTime = None):
       # Get the DTE as a fraction of a year
       if tau == None:
-         tau = self.optionTau(contract)
+         tau = self.optionTau(contract, atTime = atTime)
+      # Get the current price of the underlying unless otherwise specified
+      if spotPrice == None:
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
       # Compute D1
       if d1 == None:
-         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
+         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir, spotPrice = spotPrice)
       # Compute Vega
       vega = spotPrice * norm.pdf(d1) * np.sqrt(tau)
       return vega
 
 
    # Compute the Vomma of an option
-   def bsmVomma(self, contract, sigma, tau = None, d1 = None, d2 = None, ir = None):
+   def bsmVomma(self, contract, sigma, tau = None, d1 = None, d2 = None, ir = None, spotPrice = None, atTime = None):
       # Get the DTE as a fraction of a year
       if tau == None:
-         tau = self.optionTau(contract)
-      # Spot price (mid-price)
-      spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+         tau = self.optionTau(contract, atTime = atTime)
+      # Get the current price of the underlying unless otherwise specified
+      if spotPrice == None:
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
       # Compute D1
       if d1 == None:
-         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
+         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir, spotPrice = spotPrice)
       # Compute D2
       if d2 == None:
-         d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir)
+         d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
       # Compute Vomma
       if(sigma == 0):
          vomma = float('inf')
@@ -247,15 +265,37 @@ class BSM:
 
       # Initialize the IV to zero in case anything goes wrong
       IV = 0
-      # Find the root -> Implied Volatility
+      # Initialize the flag to mark whether we were able to find the root
+      converged = False
+      
+      # Find the root -> Implied Volatility: Use Halley's method
       try:
-         #sol = optimize.root_scalar(f, x0 = 0.1, args = (contract, tau), fprime = fprime, fprime2 = fprime2, method = 'newton', xtol = 1e-10)
-         sol = optimize.root_scalar(f, bracket = [0.0001, 2], args = (contract, tau), xtol = 1e-10)
+         # Start the search at the lastest known value for the IV (if previously calculated)
+         x0 = 0.1
+         if hasattr(contract, "BSMImpliedVolatility"):
+            x0 = contract.BSMImpliedVolatility
+         sol = optimize.root_scalar(f, x0 = x0, args = (contract, tau), fprime = fprime, fprime2 = fprime2, method = 'halley', xtol = 1e-6)
+         # Get the convergence status
+         converged = sol.converged
          # Set the IV if we found the root
-         if sol.converged:
+         if converged:
             IV = sol.root
       except:
          pass
+
+      # Fallback method (Bisection) if Halley's optimization failed
+      if not converged:
+         # Find the root -> Implied Volatility
+         try:
+            sol = optimize.root_scalar(f, bracket = [0.0001, 2], args = (contract, tau), xtol = 1e-6)
+            # Get the convergence status
+            converged = sol.converged
+            # Set the IV if we found the root
+            if converged:
+               IV = sol.root
+         except:
+            pass
+
       
       # Check if we need to save the IV as an attribute of the contract object
       if saveIt:
@@ -268,14 +308,14 @@ class BSM:
       return IV
    
    # Compute the Delta of an option
-   def bsmDelta(self, contract, sigma, tau = None, d1 = None, ir = None):
+   def bsmDelta(self, contract, sigma, tau = None, d1 = None, ir = None, spotPrice = None, atTime = None):
       if d1 == None:
          if tau == None:
             # Get the DTE as a fraction of a year
-            tau = self.optionTau(contract)
+            tau = self.optionTau(contract, atTime = atTime)
                      
          # Compute D1
-         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
+         d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir, spotPrice = spotPrice)
       ### if (d1 == None)
          
       # Compute option delta (rounded to 2 digits)
@@ -283,40 +323,42 @@ class BSM:
          delta = norm.cdf(d1)
       else:
          delta = -norm.cdf(-d1)
-      return round(delta, 2)
+      return delta
    
-   def computeGreeks(self, contract, sigma = None, ir = None, saveIt = False):
+   def computeGreeks(self, contract, sigma = None, ir = None, spotPrice = None, atTime = None, saveIt = False):
       # Start the timer
       self.context.executionTimer.start()
       
       # Avoid recomputing the Greeks if we have already done it for this time bar
       if hasattr(contract, "BSMGreeks") and contract.BSMGreeks.lastUpdated == self.context.Time:
-         return
+         return contract.BSMGreeks
       
       # Get the DTE as a fraction of a year
-      tau = self.optionTau(contract)
+      tau = self.optionTau(contract, atTime = atTime)
       
       if sigma == None:
          # Compute Implied Volatility
          sigma = self.bsmIV(contract, tau = tau, saveIt = saveIt)
       ### if (sigma == None)
       
-      # Spot price (mid-price)
-      spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+      # Get the current price of the underlying unless otherwise specified
+      if spotPrice == None:
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
+         
       # Compute D1
-      d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir)
+      d1 = self.bsmD1(contract, sigma, tau = tau, ir = ir, spotPrice = spotPrice)
       # Compute D2
-      d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir)
+      d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
             
       # First order derivatives
-      delta = self.bsmDelta(contract, sigma = sigma, tau = tau, d1 = d1, ir = ir)
-      theta = self.bsmTheta(contract, sigma, tau = tau, d1 = d1, d2 = d2, ir = ir)
-      vega = self.bsmVega(contract, sigma, tau = tau, d1 = d1, ir = ir)
-      rho = self.bsmRho(contract, sigma, tau = tau, d1 = d1, d2 = d2, ir = ir)
+      delta = self.bsmDelta(contract, sigma = sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
+      theta = self.bsmTheta(contract, sigma, tau = tau, d1 = d1, d2 = d2, ir = ir, spotPrice = spotPrice)
+      vega = self.bsmVega(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
+      rho = self.bsmRho(contract, sigma, tau = tau, d1 = d1, d2 = d2, ir = ir, spotPrice = spotPrice)
 
       # Second Order derivatives
-      gamma = self.bsmGamma(contract, sigma, tau = tau, d1 = d1, ir = ir)
-      vomma = self.bsmVomma(contract, sigma, tau = tau, d1 = d1, d2 = d2, ir = ir)
+      gamma = self.bsmGamma(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
+      vomma = self.bsmVomma(contract, sigma, tau = tau, d1 = d1, d2 = d2, ir = ir, spotPrice = spotPrice)
       
       # Lambda (a.k.a. elasticity or leverage)
       elasticity = delta * self.contractUtils.midPrice(contract)/spotPrice
@@ -352,16 +394,20 @@ class BSM:
       if isinstance(contracts, list):
          # Loop through all contracts
          for contract in contracts:
+            # Get the current price of the underlying
+            spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
             # Compute the Greeks for the contract
-            self.computeGreeks(contract, sigma = sigma, ir = ir, saveIt = True)
+            self.computeGreeks(contract, sigma = sigma, ir = ir, spotPrice = spotPrice, saveIt = True)
       else:
+         # Get the current price of the underlying
+         spotPrice = self.contractUtils.getUnderlyingLastPrice(contracts)
          # Compute the Greeks on a single contract
-         self.computeGreeks(contracts, sigma = sigma, ir = ir, saveIt = True)
+         self.computeGreeks(contracts, sigma = sigma, ir = ir, spotPrice = spotPrice, saveIt = True)
          
          # Log the contract details
          self.logger.trace(f"Contract: {contracts.Symbol}")
          self.logger.trace(f"  -> Contract Mid-Price: {self.contractUtils.midPrice(contracts)}")
-         self.logger.trace(f"  -> Spot: {self.contractUtils.getUnderlyingLastPrice(contracts)}")
+         self.logger.trace(f"  -> Spot: {spotPrice}")
          self.logger.trace(f"  -> Strike: {contracts.Strike}")
          self.logger.trace(f"  -> Type: {'Call' if contracts.Right == OptionRight.Call else 'Put'}")
          self.logger.trace(f"  -> IV: {contracts.BSMImpliedVolatility}")
@@ -380,13 +426,19 @@ class BSM:
    
 
 class BSMGreeks:
-   def __init__(self, delta = None, gamma = None, vega = None, theta = None, rho = None, vomma = None, elasticity = None, IV = None, lastUpdated = None):
-      self.Delta = delta
-      self.Gamma = gamma
-      self.Vega = vega
-      self.Theta = theta
-      self.Rho = rho
-      self.Vomma = vomma
-      self.Elasticity = elasticity
-      self.IV = IV
+   def __init__(self, delta = None, gamma = None, vega = None, theta = None, rho = None, vomma = None, elasticity = None, IV = None, lastUpdated = None, precision = 5):
+      self.Delta = self.roundIt(delta, precision)
+      self.Gamma = self.roundIt(gamma, precision)
+      self.Vega = self.roundIt(vega, precision)
+      self.Theta = self.roundIt(theta, precision)
+      self.Rho = self.roundIt(rho, precision)
+      self.Vomma = self.roundIt(vomma, precision)
+      self.Elasticity = self.roundIt(elasticity, precision)
+      self.IV = self.roundIt(IV, precision)
       self.lastUpdated = lastUpdated
+      
+   def roundIt(self, value, precision = None):
+      if precision:
+         return round(value, precision)
+      else:
+         return value

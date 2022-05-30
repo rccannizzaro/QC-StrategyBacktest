@@ -1,3 +1,7 @@
+#region imports
+from AlgorithmImports import *
+#endregion
+
 ########################################################################################
 #                                                                                      #
 # Licensed under the Apache License, Version 2.0 (the "License");                      #
@@ -26,10 +30,13 @@ class OptionStrategyOrder:
    # Default parameters
    defaultParameters = {
       "creditStrategy": True
+      , "maxActivePositions": None
       , "maxOrderQuantity": 1
       , "slippage": 0.0
       , "profitTarget": 0.6
       , "stopLossMultiplier": 1.5
+      # Minimum time distance between opening two consecutive trades
+      , "minimumTradeScheduleDistance": timedelta(hours = 0)
       # If multiple expirations are available in the chain, should we use the furthest (True) or the earliest (False)
       , "useFurthestExpiry": True
       # Controls whether to consider the DTE of the last closed position when opening a new one:
@@ -40,6 +47,7 @@ class OptionStrategyOrder:
       , "dteThreshold": 21
       , "forceDteThreshold": False
       , "ditThreshold": None
+      , "hardDitThreshold": None
       , "forceDitThreshold": False
       # Credit Targeting: either using a fixed credit amount (targetPremium) or a dynamic credit (percentage of Net Liquidity)
       , "targetPremiumPct": None
@@ -76,12 +84,18 @@ class OptionStrategyOrder:
       , "includeCancelledOrders": True
       # Controls whether to include details on each leg (open/close fill price and descriptive statistics about mid-price, Greeks, and IV)
       , "includeLegDetails": False
+      # Controls whether to track the details on each leg across the life of the trade
+      , "trackLegDetails": False
       # Control whether to allow multiple positions to be opened for the same Expiration date
       , "allowMultipleEntriesPerExpiry": False
       # The frequency (in minutes) with which the leg details are updated (used only if includeLegDetails = True)
       , "legDatailsUpdateFrequency": 30
+      # The frequency (in minutes) with which the position is managed
+      , "managePositionFrequency": 1
       # Controls the memory (in minutes) of EMA process. The exponential decay is computed such that the contribution of each value decays by 95% after <emaMemory> minutes (i.e. decay^emaMemory = 0.05)
       , "emaMemory": 200
+      # Ensures that the Stop Loss does not exceed the theoretical loss. (Set to False for Credit Calendars)
+      , "capStopLoss": True
    }
 
    @staticmethod
@@ -136,6 +150,13 @@ class OptionStrategyOrder:
       self.limitOrders = {}
       # Create FIFO list to keep track of all the recently closed positions (needed for the Dynamic DTE selection)
       self.recentlyClosedDTE = []
+      
+      # Keep track of the number of open positions that are specific to this strategy
+      self.currentActivePositions = 0
+      # Keep track of the number of working orders to open that are specific to this strategy
+      self.currentWorkingOrdersToOpen = 0
+      # Keep track of when was the last position opened 
+      self.lastOpenedDttm = None
 
 
    # Interface method. Must be implemented by the inheriting class
@@ -254,6 +275,7 @@ class OptionStrategyOrder:
       elasticity = {}
       IV = {}
       midPrices = {}
+      contractExpiry = {}
 
       # Compute the Greeks for each contract (if not already available)
       self.bsm.setGreeks(contracts)
@@ -305,6 +327,7 @@ class OptionStrategyOrder:
 
          # Set the strike in the dictionary -> "<short|long><Call|Put>": <strike>
          strikes[f"{orderSideDesc}"] = contract.Strike
+         contractExpiry[f"{orderSideDesc}"] = contract.Expiry
          # Set the Greeks and IV in the dictionary -> "<short|long><Call|Put>": <greek|IV>
          delta[f"{orderSideDesc}"] = contract.BSMGreeks.Delta
          gamma[f"{orderSideDesc}"] = contract.BSMGreeks.Gamma
@@ -392,6 +415,7 @@ class OptionStrategyOrder:
                , "strategy": strategy
                , "sides": sides
                , "sidesDesc": sidesDesc
+               , "contractExpiry": contractExpiry
                , "contractSide": contractSide
                , "contractSideDesc": contractSideDesc
                , "contractDictionary": contractDictionary
@@ -746,3 +770,48 @@ class OptionStrategyOrder:
       order = self.getOrderDetails(legs, sides, strategy, sell = sell, sidesDesc = sidesDesc)
       # Return the order
       return order
+
+
+   def getCustomOrder(self, contracts, types, deltas = None, sides = None, sidesDesc = None, strategy = "Custom", sell = None):
+
+      # Make sure the Sides parameter has been specified
+      if not sides:
+         self.logger.error("Input parameter sides cannot be null. No order will be returned.")
+         return
+      
+      # Make sure the Sides and Deltas parameters are of the same length
+      if not deltas or len(deltas) != len(sides):
+         self.logger.error(f"Input parameters deltas = {deltas} and sides = {sides} must have the same length. No order will be returned.")
+         return
+      
+      # Convert types into a list if it is a string
+      if type(types) == str:
+         types = [types] * len(sides)
+
+      # Make sure the Sides and Types parameters are of the same length
+      if not types or len(types) != len(sides):
+         self.logger.error(f"Input parameters types = {types} and sides = {sides} must have the same length. No order will be returned.")
+         return
+
+      legs = []
+      midPrice = 0
+      for side, type, delta in zip(sides, types, deltas):
+         # Get all Puts with a strike lower than the given putStrike and delta lower than the given putDelta
+         deltaContracts = self.strategyBuilder.getContracts(contracts, type = type, toDelta = delta, reverse = type.lower() == "put")
+         # Exit if we could not find the contract
+         if not deltaContracts:
+            return
+         # Append the contract to the list of legs
+         legs = legs + delta_contracts[0]
+         # Update the mid-price
+         midPrice -= self.contractUtils.midPrice(delta_contracts[0]) * side
+      
+      # Automatically determine if this is a credit or debit strategy (unless specified)
+      if sell is None:
+         sell = midPrice > 0
+         
+      # Create order details
+      order = self.getOrderDetails(legs, sides, strategy, sell = sell, sidesDesc = sidesDesc)
+      # Return the order
+      return order
+
