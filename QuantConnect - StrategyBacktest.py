@@ -1,3 +1,7 @@
+#region imports
+from AlgorithmImports import *
+#endregion
+
 ########################################################################################
 #                                                                                      #
 # Licensed under the Apache License, Version 2.0 (the "License");                      #
@@ -110,6 +114,7 @@ class StrategyBacktest(QCAlgorithm):
       self.dteThreshold = None
       # DIT Threshold. This is ignored if self.dte < self.ditThreshold
       self.ditThreshold = None
+      self.hardDitThreshold = None
       
       # Controls what happens when an open position reaches/crosses the dteThreshold ( -> DTE(openPosition) <= dteThreshold)
       # - If True, the position is closed as soon as the dteThreshold is reached, regardless of whether the position is profitable or not
@@ -129,24 +134,31 @@ class StrategyBacktest(QCAlgorithm):
       self.bidAskSpreadRatio = 0.8
 
       #Controls whether to include Cancelled orders (Limit orders that didn't fill) in the final output
-      self.includeCancelledOrders = True
+      self.includeCancelledOrders = False
 
       # Controls whether to allow multiple positions to be opened for the same Expiration date
       self.allowMultipleEntriesPerExpiry = False
       
       # Controls whether to include details on each leg (open/close fill price and descriptive statistics about mid-price, Greeks, and IV)
       self.includeLegDetails = False
+      self.trackLegDetails = False
       # The frequency (in minutes) with which the leg details are updated (used only if includeLegDetails = True). 
       # Updating with high frequency (i.e. every 5 minutes) will slow down the execution
       self.legDatailsUpdateFrequency = 30
-      
-      
+	  
+	  # The frequency (in minutes) with which each position is managed
+      self.managePositionFrequency = 30
+
       # Controls whether to use the furthest (True) or the earliest (False) expiration date when multiple expirations are available in the chain
       self.useFurthestExpiry = True
       # Controls whether to consider the DTE of the last closed position when opening a new one:
       # If True, the Expiry date of the new position is selected such that the open DTE is the nearest to the DTE of the closed position
-      self.dynamicDTESelection = True
+      self.dynamicDTESelection = False
       
+	  # Minimum time distance between opening two consecutive trades
+      self.minimumTradeScheduleDistance = timedelta(days = 1)
+
+
       # ########################################################################
       # Trading Strategies. 
       #   - Multiple strategies can be executed at the same time
@@ -191,7 +203,8 @@ class StrategyBacktest(QCAlgorithm):
       # Setup the backtesting algorithm
       self.setupBacktest()
       
-      # Setup the charts
+      # Setup the charts. Use the following flags to disable certain charts:
+	  # PnL = False, Performance = False, WinLossStats = False, LossDetails = False
       self.setupCharts()
       
       
@@ -329,6 +342,9 @@ class StrategyBacktest(QCAlgorithm):
       
       # Dictionary to keep track of all the available expiration dates at any given date
       self.expiryList = {}
+
+      # Dictionary to keep track of all leg details across time
+      self.positionTracking = {}
       
       # Add the underlying
       if self.ticker in ["SPX", "VIX"]:
@@ -382,6 +398,7 @@ class StrategyBacktest(QCAlgorithm):
       security.SetMarketPrice(self.GetLastKnownPrice(security))
       if security.Type in [SecurityType.Option, SecurityType.IndexOption]:
          security.SetFillModel(BetaFillModel(self))
+         #security.SetFillModel(MidPriceFillModel(self))
          security.SetFeeModel(TastyWorksFeeModel())
 
 
@@ -592,6 +609,10 @@ class StrategyBacktest(QCAlgorithm):
    def OnData(self, slice):
       # Start the timer
       self.executionTimer.start()
+
+      # Exit if the algorithm is warming up or the market is closed (avoid processing orders on the last minute as these will be executed the following day)
+      if self.IsWarmingUp or not self.IsMarketOpen(self.underlyingSymbol) or self.Time.time() >= time(16, 0, 0):
+         return
       
       # Update the charts
       self.updateCharts()
@@ -657,6 +678,24 @@ class StrategyBacktest(QCAlgorithm):
       self.Log(dfAllPositions.to_csv(index = False))
       #self.Log(self.allPositions)
       self.Log("")
+
+      if self.positionTracking:
+         first = True
+         for position in self.positionTracking.values():
+            if first:
+               dfTracking = pd.DataFrame.from_dict(position, orient = "index")
+               first = False
+            else:
+               dfTracking = dfTracking.append(pd.DataFrame.from_dict(position, orient = "index"), ignore_index = True)
+         
+         self.Log("---------------------------------")
+         self.Log("           Leg Details           ")
+         self.Log("---------------------------------")
+         self.Log("")
+         # Print the data frame to the log in csv format
+         self.Log(dfTracking.to_csv(index = False))
+         self.Log("")
+
       
 class TastyWorksFeeModel:
    def GetOrderFee(self, parameters):
@@ -668,6 +707,27 @@ class TastyWorksFeeModel:
 # Dummy class useful to create empty objects
 class CustomObject:
    pass
+
+
+# Custom class: fills orders at the mid-price
+class MidPriceFillModel(ImmediateFillModel):
+   def __init__(self, context):
+      self.context = context
+      
+   def MarketFill(self, asset, order):
+      # Start the timer
+      self.context.executionTimer.start()
+   
+      # Call the parent method
+      fill = super().MarketFill(asset, order)
+      # Compute the new fillPrice (at the mid-price)
+      fillPrice = round(0.5*(asset.AskPrice + asset.BidPrice), 2)
+      # Update the FillPrice attribute
+      fill.FillPrice = fillPrice
+      # Stop the timer
+      self.context.executionTimer.stop()
+      # Return the fill
+      return fill
 
 # Custom Fill model based on Beta distribution:
 #  - Orders are filled based on a Beta distribution  skewed towards the mid-price with Sigma = bidAskSpread/6 (-> 99% fills within the bid-ask spread)
