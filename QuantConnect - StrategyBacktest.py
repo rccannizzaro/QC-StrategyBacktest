@@ -123,6 +123,7 @@ class StrategyBacktest(QCAlgorithm):
       # Controls what happens when an open position reaches/crosses the ditThreshold ( -> DIT(openPosition) >= ditThreshold)
       # - If True, the position is closed as soon as the ditThreshold is reached, regardless of whether the position is profitable or not
       # - If False, once the ditThreshold is reached, the position is closed as soon as it is profitable
+      # - If self.hardDitThreashold is set, the position is closed once the hardDitThreashold is crossed, regardless of whether forceDitThreshold is True or False
       self.forceDitThreshold = False
             
       # Maximum number of open positions at any given time
@@ -141,6 +142,7 @@ class StrategyBacktest(QCAlgorithm):
       
       # Controls whether to include details on each leg (open/close fill price and descriptive statistics about mid-price, Greeks, and IV)
       self.includeLegDetails = False
+      # Controls whether to track the details on each leg across the life of the trade (it generates a separate csv in the log with leg details at regular time intervals)
       self.trackLegDetails = False
       # The frequency (in minutes) with which the leg details are updated (used only if includeLegDetails = True). 
       # Updating with high frequency (i.e. every 5 minutes) will slow down the execution
