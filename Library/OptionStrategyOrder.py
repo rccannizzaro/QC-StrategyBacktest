@@ -789,7 +789,7 @@ class OptionStrategyOrder:
          return
       
       # Convert types into a list if it is a string
-      if type(types) == str:
+      if isinstance(types, str):
          types = [types] * len(sides)
 
       # Make sure the Sides and Types parameters are of the same length

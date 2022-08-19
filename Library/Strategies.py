@@ -105,6 +105,16 @@ class ButterflyStrategy(OptionStrategy):
                                   , sell = self.parameters["creditStrategy"]
                                   )
 
+class CustomStrategy(OptionStrategy):
+   def getOrder(self, chain):
+      return self.getCustomOrder(chain
+                                  , types = self.parameters.get("types", None)
+                                  , deltas = self.parameters.get("deltas", None)
+                                  , sides = self.parameters.get("sides", None)
+                                  , sidesDesc =self.parameters.get("sidesDesc", None)
+                                  , strategy = self.name
+                                  , sell = self.parameters["creditStrategy"]
+                                  )
 
 
 

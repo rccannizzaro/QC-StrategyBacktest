@@ -188,6 +188,14 @@ class StrategyBacktest(QCAlgorithm):
       # self.strategies.append(IronFlyStrategy(self, netDelta = None, putWingSize = 10, callWingSize = 10, creditStrategy = True))
       # self.strategies.append(ButterflyStrategy(self, butteflyType = "Put", netDelta = None, butterflyLeftWingSize = 10, butterflyRightWingSize = 10, creditStrategy = True))
       # self.strategies.append(TEBombShelterStrategy(self, delta = 15, frontDte = self.dte - 30, hedgeAllocation = 0.1, chartUpdateFrequency = 5))
+      # self.strategies.append(CustomStrategy(self
+      #                                       , name = "BWB"
+      #                                       , deltas = [50, 30, 10]
+      #                                       , types = "Put"
+      #                                       , sides = [1, -2, 1]
+      #                                       , sidesDesc = ["Delta50Put", "Delta30Put", "Delta10Put"]
+      #                                       , creditStrategy = None
+      #                                       ))
 
       # Coarse filter for the Universe selection. It selects nStrikes on both sides of the ATM strike for each available expiration
       self.nStrikesLeft = 200
@@ -678,9 +686,11 @@ class StrategyBacktest(QCAlgorithm):
       self.Log("           Trade Log             ")
       self.Log("---------------------------------")
       self.Log("")
-      # Print the data frame to the log in csv format
-      self.Log(dfAllPositions.to_csv(index = False))
-      #self.Log(self.allPositions)
+      # Print the csv header
+      self.Log(dfAllPositions.head(0).to_csv(index = False, header = True, line_terminator = " "))
+      # Print the data frame to the log in csv format (one row at the time to avoid QC truncation limitation)
+      for i in range(0, len(dfAllPositions.index)):
+         self.Log(dfAllPositions.iloc[[i]].to_csv(index = False, header = False, line_terminator = " "))
       self.Log("")
 
       if self.positionTracking:
@@ -696,8 +706,10 @@ class StrategyBacktest(QCAlgorithm):
          self.Log("           Leg Details           ")
          self.Log("---------------------------------")
          self.Log("")
-         # Print the data frame to the log in csv format
-         self.Log(dfTracking.to_csv(index = False))
+         # Print the data frame to the log in csv format (one row at the time to avoid QC truncation limitation)
+         self.Log(dfTracking.head(0).to_csv(index = False, header = True, line_terminator = " "))
+         for i in range(0, len(dfTracking.index)):
+            self.Log(dfTracking.iloc[[i]].to_csv(index = False, header = False, line_terminator = " "))
          self.Log("")
 
       
