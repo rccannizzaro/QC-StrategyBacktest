@@ -27,7 +27,7 @@ from ContractUtils import *
 
 class BSM:
 
-   def __init__(self, context):
+   def __init__(self, context, tradingDays = 365.0):
       # Set the context
       self.context = context
       # Set the logger
@@ -36,6 +36,8 @@ class BSM:
       self.contractUtils = ContractUtils(context)
       # Set the IR 
       self.riskFreeRate = context.riskFreeRate
+      # Set the number of trading days
+      self.tradingDays = tradingDays
       
    def isITM(self, contract, spotPrice = None):
       # Get the current price of the underlying unless otherwise specified
@@ -111,7 +113,7 @@ class BSM:
       # Days to expiration: use the fraction of minutes until market close in case of 0-DTE (390 minutes = 6.5h -> from 9:30 to 16:00)
       dte = max(0, timeDiff.days, timeDiff.seconds/(60.0*390.0))
       # DTE as a fraction of a year
-      tau = dte/365.0
+      tau = dte/self.tradingDays
       return tau
 
    # Pricing of a European option based on the Black Scholes Merton model (without dividends)
@@ -160,11 +162,11 @@ class BSM:
       SNs = -(spotPrice * norm.pdf(d1) * sigma) / (2.0 * np.sqrt(tau))
       # r*X*e^(-r*tau)
       rXert = self.riskFreeRate * contract.Strike * np.exp(-self.riskFreeRate*tau)
-      # Compute Theta
+      # Compute Theta (divide by the number of trading days to get a daily Theta value)
       if contract.Right == OptionRight.Call:
-         theta = SNs  -  rXert * norm.cdf(d2)
+         theta = (SNs  -  rXert * norm.cdf(d2))/self.tradingDays
       else:
-         theta = SNs  +  rXert * norm.cdf(-d2)
+         theta = (SNs  +  rXert * norm.cdf(-d2))/self.tradingDays
       return theta
 
 
