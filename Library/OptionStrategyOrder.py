@@ -86,6 +86,8 @@ class OptionStrategyOrder:
       , "includeCancelledOrders": True
       # Controls whether to include details on each leg (open/close fill price and descriptive statistics about mid-price, Greeks, and IV)
       , "includeLegDetails": False
+      # Controls which greeks are included in the output log
+      , "greeksIncluded": ["Delta", "Gamma", "Vega", "Theta", "Rho", "Vomma", "Elasticity"]
       # Controls whether to track the details on each leg across the life of the trade
       , "trackLegDetails": False
       # Control whether to allow multiple positions to be opened for the same Expiration date
@@ -804,9 +806,9 @@ class OptionStrategyOrder:
          if not deltaContracts:
             return
          # Append the contract to the list of legs
-         legs = legs + delta_contracts[0]
+         legs = legs + deltaContracts[0]
          # Update the mid-price
-         midPrice -= self.contractUtils.midPrice(delta_contracts[0]) * side
+         midPrice -= self.contractUtils.midPrice(deltaContracts[0]) * side
       
       # Automatically determine if this is a credit or debit strategy (unless specified)
       if sell is None:

@@ -320,15 +320,16 @@ class OptionStrategy(OptionStrategyOrder):
             position[f"{self.name}.{key}.PnL.EMA({emaMemory})"] = 0.0
       
       # Add details about the greeks, and create placeholders to keep track of their range (Min, Avg, Max)
-      for greek in ["delta", "gamma", "vega", "theta", "rho", "vomma", "elasticity"]:
+      #for greek in ["delta", "gamma", "vega", "theta", "rho", "vomma", "elasticity"]:
+      for greek in parameters["greeksIncluded"]:
          for key in sidesDesc:
-            position[f"{self.name}.{key}.{greek.title()}"] = order[f"{greek}"][key]
+            position[f"{self.name}.{key}.{greek.title()}"] = order[f"{greek.lower()}"][key]
             if parameters["includeLegDetails"]:
-               position[f"{self.name}.{key}.{greek.title()}.Close"] = order[f"{greek}"][key]
-               position[f"{self.name}.{key}.{greek.title()}.Min"] = order[f"{greek}"][key]
-               position[f"{self.name}.{key}.{greek.title()}.Avg"] = order[f"{greek}"][key]
-               position[f"{self.name}.{key}.{greek.title()}.Max"] = order[f"{greek}"][key]
-               position[f"{self.name}.{key}.{greek.title()}.EMA({emaMemory})"] = order[f"{greek}"][key]
+               position[f"{self.name}.{key}.{greek.title()}.Close"] = order[f"{greek.lower()}"][key]
+               position[f"{self.name}.{key}.{greek.title()}.Min"] = order[f"{greek.lower()}"][key]
+               position[f"{self.name}.{key}.{greek.title()}.Avg"] = order[f"{greek.lower()}"][key]
+               position[f"{self.name}.{key}.{greek.title()}.Max"] = order[f"{greek.lower()}"][key]
+               position[f"{self.name}.{key}.{greek.title()}.EMA({emaMemory})"] = order[f"{greek.lower()}"][key]
       
        # Add details about the IV 
       for key in sidesDesc:
@@ -376,7 +377,7 @@ class OptionStrategy(OptionStrategyOrder):
                                                           , "fills": 0
                                                           }
 
-         if useMarketOrders:
+         if useMarketOrders and orderSide != 0:
             # Send the Market order (asynchronous = True -> does not block the execution in case of partial fills)
             context.MarketOrder(contract.Symbol, orderSide * orderQuantity, asynchronous = True, tag = orderTag)
       ### Loop through all contracts   
@@ -464,7 +465,8 @@ class OptionStrategy(OptionStrategyOrder):
                # Set the order side: -1 -> Sell, +1 -> Buy
                orderSide = orderSign * orderSides[n]
                # Send the Market order (asynchronous = True -> does not block the execution in case of partial fills)
-               context.MarketOrder(contract.Symbol, orderSide * orderQuantity, asynchronous = True, tag = orderTag)
+               if orderSide != 0:
+                  context.MarketOrder(contract.Symbol, orderSide * orderQuantity, asynchronous = True, tag = orderTag)
                # Increment the counter
                n += 1
             ### for contract in contracts
@@ -491,15 +493,19 @@ class OptionStrategy(OptionStrategyOrder):
       # Get the side of the contract at the time of opening: -1 -> Short   +1 -> Long
       contractSide = openPosition["contractSide"][contract.Symbol]
       contractSideDesc = openPosition["contractSideDesc"][contract.Symbol]
+      orderQuantity = openPosition["orderQuantity"]
       
       # Set the prefix used to identify each field to be updated
       fieldPrefix = f"{self.name}.{contractSideDesc}"
 
       # Store the Open/Close Fill Price (if specified)
+      closeFillPrice = None
       if orderType != None:
          bookPosition[f"{fieldPrefix}.{orderType}MidPrice"] = self.contractUtils.midPrice(contract)
          bookPosition[f"{fieldPrefix}.{orderType}BidAskSpread"] = self.contractUtils.bidAskSpread(contract)
          bookPosition[f"{fieldPrefix}.{orderType}FillPrice"] = fillPrice
+         if orderType == "close":
+            closeFillPrice = fillPrice
 
       # Exit if we don't need to include the details
       if not parameters["includeLegDetails"] or context.Time.minute % parameters["legDatailsUpdateFrequency"] != 0:
@@ -516,6 +522,9 @@ class OptionStrategy(OptionStrategyOrder):
             
       # Compute the mid-price of the contract
       midPrice = self.contractUtils.midPrice(contract)
+      # Use the fill price if the position has been closed, else use the midPrice for the intermediate PnL calculations
+      closeFillPrice = closeFillPrice or midPrice * np.sign(contractSide)
+      
 
       # Compute the Greeks (retrieve it as a dictionary)
       greeks = self.bsm.computeGreeks(contract).__dict__
@@ -523,14 +532,16 @@ class OptionStrategy(OptionStrategyOrder):
       greeks["midPrice"] = midPrice
       
       # List of variables for which we are going to update the stats
-      vars = ["midPrice", "Delta", "Gamma", "Vega", "Theta", "Rho", "Vomma", "Elasticity", "IV"]
+      #vars = ["midPrice", "Delta", "Gamma", "Vega", "Theta", "Rho", "Vomma", "Elasticity", "IV"]
+      vars = [var.title() for var in parameters["greeksIncluded"]] + ["midPrice", "IV"]
       
       # Get the fill price at the open
       openFillPrice = bookPosition[f"{fieldPrefix}.openFillPrice"]
       # Check if the fill price is set 
       if not math.isnan(openFillPrice):
          # Compute the PnL of the contract (100 shares per contract)
-         PnL = 100 * (openFillPrice + midPrice * np.sign(contractSide))*abs(contractSide)
+         PnL = 100 * (openFillPrice + closeFillPrice)*abs(contractSide)*orderQuantity
+         
          # Add the PnL to the list of variables for which we want to update the stats
          vars.append("PnL")         
          greeks["PnL"] = PnL
@@ -975,7 +986,7 @@ class OptionStrategy(OptionStrategyOrder):
          self.workingOrders[orderTag][symbol] = {"positionKey": positionKey, "orderId": orderId, "expiryStr" : expiryStr, "orderType": "close", "fills": 0}
 
          # Determine what type of order (Limit/Market) should be executed.
-         if useMarketOrders:
+         if useMarketOrders and orderSide != 0:
             # Send the Market order (asynchronous = True -> does not block the execution in case of partial fills)
             context.MarketOrder(symbol, orderSide * orderQuantity, asynchronous = True, tag = orderTag)
       ### Loop through all contracts   
