@@ -144,11 +144,15 @@ class StrategyBacktest(QCAlgorithm):
       
       # Controls whether to include details on each leg (open/close fill price and descriptive statistics about mid-price, Greeks, and IV)
       self.includeLegDetails = False
+      # Specify which Greeks should be included in the trade log (Set an empty list if you don't want any of the greeks)
+      self.greeksIncluded = ["Delta", "Gamma", "Vega", "Theta", "Rho", "Vomma", "Elasticity"]
+      # self.greeksIncluded = []
+
       # Controls whether to track the details on each leg across the life of the trade (it generates a separate csv in the log with leg details at regular time intervals)
       self.trackLegDetails = False
       # The frequency (in minutes) with which the leg details are updated (used only if includeLegDetails = True). 
       # Updating with high frequency (i.e. every 5 minutes) will slow down the execution
-      self.legDatailsUpdateFrequency = 30
+      self.legDatailsUpdateFrequency = 15
 	  
 	  # The frequency (in minutes) with which each position is managed
       self.managePositionFrequency = 30
@@ -180,14 +184,14 @@ class StrategyBacktest(QCAlgorithm):
       
       # self.strategies.append(PutStrategy(self, delta = 10, creditStrategy = True))
       # self.strategies.append(CallStrategy(self, delta = 10, creditStrategy = True))
-      # self.strategies.append(StraddleStrategy(self, netDelta = None, creditStrategy = True))
-      # self.strategies.append(StrangleStrategy(self, putDelta = 10, callDelta = 10, creditStrategy = True))
-      self.strategies.append(PutSpreadStrategy(self, delta = 10, wingSize = 25, creditStrategy = True))
-      self.strategies.append(CallSpreadStrategy(self, delta = 10, wingSize = 25, creditStrategy = True))
-      # self.strategies.append(IronCondorStrategy(self, putDelta = 10, callDelta = 10, putWingSize = 10, callWingSize = 10, creditStrategy = True))
-      # self.strategies.append(IronFlyStrategy(self, netDelta = None, putWingSize = 10, callWingSize = 10, creditStrategy = True))
-      # self.strategies.append(ButterflyStrategy(self, butteflyType = "Put", netDelta = None, butterflyLeftWingSize = 10, butterflyRightWingSize = 10, creditStrategy = True))
-      # self.strategies.append(TEBombShelterStrategy(self, delta = 15, frontDte = self.dte - 30, hedgeAllocation = 0.1, chartUpdateFrequency = 5))
+      # self.strategies.append(StraddleStrategy(self, name = "Straddle", netDelta = None, creditStrategy = True))
+      # self.strategies.append(StrangleStrategy(self, name = "Strangle", putDelta = 10, callDelta = 10, creditStrategy = True))
+      self.strategies.append(PutSpreadStrategy(self, name = "PS", delta = 10, wingSize = 25, creditStrategy = True))
+      self.strategies.append(CallSpreadStrategy(self, name = "CS", delta = 10, wingSize = 25, creditStrategy = True))
+      # self.strategies.append(IronCondorStrategy(self, name = "IC", putDelta = 10, callDelta = 10, putWingSize = 10, callWingSize = 10, creditStrategy = True))
+      # self.strategies.append(IronFlyStrategy(self, name = "IF", netDelta = None, putWingSize = 10, callWingSize = 10, creditStrategy = True))
+      # self.strategies.append(ButterflyStrategy(self, name = "Bfly", butteflyType = "Put", netDelta = None, butterflyLeftWingSize = 10, butterflyRightWingSize = 10, creditStrategy = True))
+      # self.strategies.append(TEBombShelterStrategy(self, name = "TEBS", delta = 15, frontDte = self.dte - 30, hedgeAllocation = 0.1, chartUpdateFrequency = 5))
       # self.strategies.append(CustomStrategy(self
       #                                       , name = "BWB"
       #                                       , deltas = [50, 30, 10]

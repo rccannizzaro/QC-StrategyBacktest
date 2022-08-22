@@ -806,7 +806,7 @@ class OptionStrategyOrder:
          if not deltaContracts:
             return
          # Append the contract to the list of legs
-         legs = legs + deltaContracts[0]
+         legs = legs + [deltaContracts[0]]
          # Update the mid-price
          midPrice -= self.contractUtils.midPrice(deltaContracts[0]) * side
       

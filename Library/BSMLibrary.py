@@ -364,8 +364,8 @@ class BSM:
       gamma = self.bsmGamma(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
       vomma = self.bsmVomma(contract, sigma, tau = tau, d1 = d1, d2 = d2, ir = ir, spotPrice = spotPrice)
       
-      # Lambda (a.k.a. elasticity or leverage)
-      elasticity = delta * self.contractUtils.midPrice(contract)/spotPrice
+      # Lambda (a.k.a. elasticity or leverage: the percentage change in option value per percentage change in the underlying price)
+      elasticity = delta * np.float64(spotPrice)/np.float64(self.contractUtils.midPrice(contract))
       
       
       # Create a Greeks object
