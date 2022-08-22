@@ -155,9 +155,9 @@ class TEBombShelterStrategy(OptionStrategy):
       # Proceed if we have not already opened a position on the given expiration
       if(self.parameters["allowMultipleEntriesPerExpiry"] or expiryStr not in self.openPositions):
          # Filter the contracts in the chain, keep only the ones expiring on the back-cycle
-         backChain = self.filterByExpiry(chain, expiry = backExpiry, computeGreeks = True)
+         backChain = self.filterByExpiry(chain, expiry = backExpiry, computeGreeks = False)
          # Filter the contracts in the chain, keep only the ones expiring on the front-cycle
-         frontChain = self.filterByExpiry(chain, expiry = frontExpiry, computeGreeks = True)
+         frontChain = self.filterByExpiry(chain, expiry = frontExpiry, computeGreeks = False)
          
          # Call the getOrder method of this class
          order = self.getOrder(backChain, frontChain)
