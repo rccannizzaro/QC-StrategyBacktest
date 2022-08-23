@@ -54,6 +54,16 @@ class OptionStrategyOrder:
       # Credit Targeting: either using a fixed credit amount (targetPremium) or a dynamic credit (percentage of Net Liquidity)
       , "targetPremiumPct": None
       , "targetPremium": None
+      # Defines how the profit target is calculated. Valid options are (case insensitive):
+      # - Premium: the profit target is a percentage of the premium paid/received. 
+      # - Theta: the profit target is calculated based on the theta value of the position evaluated at self.thetaProfitDays from the time of entering the trade
+      # - TReg: the profit target is calculated as a percentage of the TReg (MaxLoss + openPremium)
+      # - Margin: the profit target is calculted as a percentage of the margin requirement (calculated based on self.portfolioMarginStress percentage upside/downside movement of the underlying)
+      , "profitTargetMethod": "Premium"
+      # Number of days into the future at which the theta of the position is calculated. Used if profitTargetMethod = "Theta"
+      , "thetaProfitDays": None
+      # Upside/Downside stress applied to the underlying to calculate the portfolio margin requirement of the position
+      , "portfolioMarginStress": 0.12
       # Limit Order Management
       , "useLimitOrders": True
       , "limitOrderRelativePriceAdjustment": 0
@@ -355,15 +365,14 @@ class OptionStrategyOrder:
 
          # Increment counter
          n += 1
-
-      # Exit if the order mid-price is zero
-      if abs(orderMidPrice) < 1e-5:
-         return
-         
+      
       # Compute Limit Order price
       if limitOrderAbsolutePrice != None:
-         # Compute the relative price adjustment (needed to adjust each leg with the same proportion)
-         limitOrderRelativePriceAdjustment = limitOrderAbsolutePrice / orderMidPrice - 1
+         if abs(orderMidPrice) < 1e-5:
+            limitOrderRelativePriceAdjustment = 0
+         else:
+            # Compute the relative price adjustment (needed to adjust each leg with the same proportion)
+            limitOrderRelativePriceAdjustment = limitOrderAbsolutePrice / orderMidPrice - 1
          # Use the specified absolute price
          limitOrderPrice = limitOrderAbsolutePrice
       else:
@@ -385,12 +394,7 @@ class OptionStrategyOrder:
          qtyMidPrice = limitOrderPrice
       else:
          # Use the contract mid-price
-         qtyMidPrice = orderMidPrice
-
-      # Exit if the price is zero
-      if abs(qtyMidPrice) <= 1e-5:
-         return
-      
+         qtyMidPrice = orderMidPrice      
 
       if targetPremium == None:
          # No target premium was provided. Use maxOrderQuantity
@@ -400,15 +404,53 @@ class OptionStrategyOrder:
          targetPremium = min(context.Portfolio.MarginRemaining, targetPremium)
 
          # Determine the order quantity based on the target premium
-         orderQuantity = abs(targetPremium / (qtyMidPrice * 100))
+         if abs(qtyMidPrice) <= 1e-5:
+            orderQuantity = 1
+         else:
+            orderQuantity = abs(targetPremium / (qtyMidPrice * 100))
          
          # Different logic for Credit vs Debit strategies
          if sell: # Credit order
             # Sell at least one contract
             orderQuantity = max(1, round(orderQuantity))
          else: # Debit order
-            # make sure the total price does not exceed the target premium
+            # Make sure the total price does not exceed the target premium
             orderQuantity = math.floor(orderQuantity)
+
+
+      # Internal function to evaluate the P&L of the position
+      def fValue(spotPrice, contracts, sides = None, atTime = None, openPremium = None):
+         # Compute the theoretical value at the given Spot price and point in time
+         prices = np.array([self.bsm.bsmPrice(contract
+                                              , sigma = contract.BSMImpliedVolatility
+                                              , spotPrice = spotPrice
+                                              , atTime = atTime
+                                              )
+                              for contract in contracts
+                            ]
+                           )
+         # Total value of the position
+         value = openPremium + sum(prices * np.array(sides))
+         return value
+
+      # Get the current price of the underlying
+      security = context.Securities[context.underlyingSymbol]
+      underlyingPrice = context.GetLastKnownPrice(security).Price
+
+      # Compute MaxLoss
+      maxLoss = self.computeOrderMaxLoss(contracts, sides)
+      # Get the Profit Target percentage is specified (default is 50%)
+      profitTargetPct = parameters.get("profitTarget", 0.5)
+      #Compute T-Reg margin based on the MaxLoss
+      TReg = min(0, orderMidPrice + maxLoss) * orderQuantity
+
+      portfolioMarginStress = parameters.get("portfolioMarginStress")
+      # Compute the projected P&L of the position following a % movement of the underlying up or down
+      portfolioMargin = min(0
+                            , fValue(underlyingPrice * (1-portfolioMarginStress), contracts, sides = sides, atTime = context.Time, openPremium = midPrice)
+                            , fValue(underlyingPrice * (1+portfolioMarginStress), contracts, sides = sides, atTime = context.Time, openPremium = midPrice)
+                            ) * orderQuantity
+
 
       # Create order details
       order = {"expiry": expiry
@@ -438,7 +480,9 @@ class OptionStrategyOrder:
                , "maxOrderQuantity": maxOrderQuantity
                , "orderQuantity": orderQuantity
                , "creditStrategy": sell
-               , "maxLoss": self.computeOrderMaxLoss(contracts, sides)
+               , "maxLoss": maxLoss
+               , "TReg": TReg
+               , "portfolioMargin": portfolioMargin
                , "open": {"orders": []
                           , "fills": 0
                           , "filled": False
@@ -462,6 +506,28 @@ class OptionStrategyOrder:
                            , "fillPrice": 0.0
                            }
             }
+
+
+      # Determine the method used to calculate the profit target
+      profitTargetMethod = (parameters.get("profitTargetMethod", "Premium") or "Premium").lower()
+      thetaProfitDays = parameters.get("thetaProfitDays", 0) or 0
+      # Set a custom profit target unless we are using the default Premium based methodology
+      if profitTargetMethod != "premium":
+         if profitTargetMethod == "theta" and thetaProfitDays > 0:
+            # Calculate the P&L of the position at T+[thetaProfitDays]
+            thetaPnL = fValue(underlyingPrice, contracts, sides = sides, atTime = context.Time + timedelta(days = thetaProfitDays), openPremium = midPrice)
+            # Profit target is a percentage of the P&L calculated at T+[thetaProfitDays]
+            profitTargetAmt = profitTargetPct * abs(thetaPnL) * orderQuantity
+         elif profitTargetMethod == "treg":
+            # Profit target is a percentage of the TReg requirement
+            profitTargetAmt = profitTargetPct * abs(TReg) * orderQuantity
+         elif profitTargetMethod == "margin":
+            # Profit target is a percentage of the margin requirement
+            profitTargetAmt = profitTargetPct * abs(portfolioMargin) * orderQuantity
+         else:
+            pass
+         # Set the target profit for the position
+         order["targetProfit"] = profitTargetAmt
 
       return order
 

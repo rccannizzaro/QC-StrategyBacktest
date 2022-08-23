@@ -95,6 +95,18 @@ class StrategyBacktest(QCAlgorithm):
       
       # Profit Target Factor (Multiplier of the premium received/paid when the position was opened)
       self.profitTarget = 0.6
+
+      # Defines how the profit target is calculated. Valid options are (case insensitive):
+      # - Premium: the profit target is a percentage of the premium paid/received. 
+      # - Theta: the profit target is calculated based on the theta value of the position evaluated at self.thetaProfitDays from the time of entering the trade
+      # - TReg: the profit target is calculated as a percentage of the TReg (MaxLoss + openPremium)
+      # - Margin: the profit target is calculted as a percentage of the margin requirement (calculated based on self.portfolioMarginStress percentage upside/downside movement of the underlying)
+      self.profitTargetMethod = "Premium"
+      # Number of days into the future at which the theta of the position is calculated. Used if profitTargetMethod = "Theta"
+      self.thetaProfitDays = None
+      # Upside/Downside stress applied to the underlying to calculate the portfolio margin requirement of the position
+      self.portfolioMarginStress = 0.12
+
       
       # Stop Loss Multiplier, expressed as a function of the profit target (rather than the credit received)
       # The position is closed (Market Order) if:
