@@ -24,6 +24,7 @@ from scipy import optimize
 from scipy.stats import norm
 from Logger import *
 from ContractUtils import *
+from fred import fred
 
 class BSM:
 
@@ -34,11 +35,34 @@ class BSM:
       self.logger = Logger(context, className = type(self).__name__, logLevel = context.logLevel)
       # Initialize the contract utils
       self.contractUtils = ContractUtils(context)
-      # Set the IR 
-      self.riskFreeRate = context.riskFreeRate
+      # Set the IR
+      self.irLastUpdatedDt = None
+      self.setRiskFreeRate()
       # Set the number of trading days
       self.tradingDays = tradingDays
-      
+
+   def setRiskFreeRate(self):
+
+      # Get the current date
+      currentDate = self.context.Time.date()
+
+      # Only update the Interest Rate if this is a new date
+      if currentDate != self.irLastUpdatedDt:
+         # Record the latest updated date
+         self.irLastUpdatedDt = currentDate
+
+         # Get the most recent IR as of the current time 
+         ir = fred.query(f"date <= '{currentDate}'").tail(1)
+
+         # Check if we found the rate for the given date
+         if ir.empty:
+            # Use the default rate
+            self.irDate = None
+            self.riskFreeRate = self.context.riskFreeRate
+         else:
+            irDatetime, self.riskFreeRate = ir[["date", "ir"]].values[0]
+            self.irDate = irDatetime.date()
+
    def isITM(self, contract, spotPrice = None):
       # Get the current price of the underlying unless otherwise specified
       if spotPrice == None:
@@ -58,6 +82,7 @@ class BSM:
 
       # Use the risk free rate unless otherwise specified
       if ir == None:
+         self.setRiskFreeRate()
          ir = self.riskFreeRate
 
       # Get the current price of the underlying unless otherwise specified
@@ -122,7 +147,12 @@ class BSM:
       # Get the DTE as a fraction of a year
       if tau == None:
          tau = self.optionTau(contract, atTime = atTime)
-      
+
+       # Use the risk free rate unless otherwise specified
+      if ir == None:
+         self.setRiskFreeRate()
+         ir = self.riskFreeRate
+     
       # Get the current price of the underlying unless otherwise specified
       if spotPrice == None:
          spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
@@ -131,7 +161,7 @@ class BSM:
       # Compute D2
       d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
       # X*e^(-r*tau)
-      Xert = contract.Strike * np.exp(-self.riskFreeRate*tau)
+      Xert = contract.Strike * np.exp(-ir*tau)
 
       #Price the option
       if contract.Right == OptionRight.Call:
@@ -149,6 +179,10 @@ class BSM:
       # Get the DTE as a fraction of a year
       if tau == None:
          tau = self.optionTau(contract, atTime = atTime)
+      # Use the risk free rate unless otherwise specified
+      if ir == None:
+         self.setRiskFreeRate()
+         ir = self.riskFreeRate
       # Get the current price of the underlying unless otherwise specified
       if spotPrice == None:
          spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
@@ -161,7 +195,7 @@ class BSM:
       # -S*N'(d1)*sigma/(2*sqrt(tau))
       SNs = -(spotPrice * norm.pdf(d1) * sigma) / (2.0 * np.sqrt(tau))
       # r*X*e^(-r*tau)
-      rXert = self.riskFreeRate * contract.Strike * np.exp(-self.riskFreeRate*tau)
+      rXert = ir * contract.Strike * np.exp(-ir*tau)
       # Compute Theta (divide by the number of trading days to get a daily Theta value)
       if contract.Right == OptionRight.Call:
          theta = (SNs  -  rXert * norm.cdf(d2))/self.tradingDays
@@ -175,6 +209,10 @@ class BSM:
       # Get the DTE as a fraction of a year
       if tau == None:
          tau = self.optionTau(contract, atTime = atTime)
+      # Use the risk free rate unless otherwise specified
+      if ir == None:
+         self.setRiskFreeRate()
+         ir = self.riskFreeRate
       # Get the current price of the underlying unless otherwise specified
       if spotPrice == None:
          spotPrice = self.contractUtils.getUnderlyingLastPrice(contract)
@@ -185,7 +223,7 @@ class BSM:
       if d2 == None:
          d2 = self.bsmD2(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
       # tau*X*e^(-r*tau)
-      tXert = tau * self.riskFreeRate * contract.Strike * np.exp(-self.riskFreeRate*tau)
+      tXert = tau * ir * contract.Strike * np.exp(-ir*tau)
       # Compute Theta
       if contract.Right == OptionRight.Call:
          rho = tXert * norm.cdf(d2)
@@ -364,8 +402,8 @@ class BSM:
       gamma = self.bsmGamma(contract, sigma, tau = tau, d1 = d1, ir = ir, spotPrice = spotPrice)
       vomma = self.bsmVomma(contract, sigma, tau = tau, d1 = d1, d2 = d2, ir = ir, spotPrice = spotPrice)
       
-      # Lambda (a.k.a. elasticity or leverage: the percentage change in option value per percentage change in the underlying price)
-      elasticity = delta * np.float64(spotPrice)/np.float64(self.contractUtils.midPrice(contract))
+      # Lambda (a.k.a. elasticity or leverage)
+      elasticity = delta * self.contractUtils.midPrice(contract)/spotPrice
       
       
       # Create a Greeks object
@@ -377,6 +415,7 @@ class BSM:
                          , vomma = vomma
                          , elasticity = elasticity
                          , IV = sigma
+                         , IR = self.riskFreeRate
                          , lastUpdated = self.context.Time
                          )
       
@@ -422,6 +461,7 @@ class BSM:
          self.logger.trace(f"  -> Rho: {contracts.BSMGreeks.Rho}")
          self.logger.trace(f"  -> Vomma: {contracts.BSMGreeks.Vomma}")
          self.logger.trace(f"  -> Elasticity: {contracts.BSMGreeks.Elasticity}")
+         self.logger.trace(f"  -> Iterest Rate: {contracts.BSMGreeks.IR}")
 
       # Stop the timer
       self.context.executionTimer.stop()
@@ -430,7 +470,7 @@ class BSM:
    
 
 class BSMGreeks:
-   def __init__(self, delta = None, gamma = None, vega = None, theta = None, rho = None, vomma = None, elasticity = None, IV = None, lastUpdated = None, precision = 5):
+   def __init__(self, delta = None, gamma = None, vega = None, theta = None, rho = None, vomma = None, elasticity = None, IV = None, IR = None, lastUpdated = None, precision = 5):
       self.Delta = self.roundIt(delta, precision)
       self.Gamma = self.roundIt(gamma, precision)
       self.Vega = self.roundIt(vega, precision)
@@ -439,6 +479,7 @@ class BSMGreeks:
       self.Vomma = self.roundIt(vomma, precision)
       self.Elasticity = self.roundIt(elasticity, precision)
       self.IV = self.roundIt(IV, precision)
+      self.IR = self.roundIt(IR, precision)
       self.lastUpdated = lastUpdated
       
    def roundIt(self, value, precision = None):
