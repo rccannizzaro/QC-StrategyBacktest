@@ -114,8 +114,8 @@ class OptionStrategyOrderCore:
 
    @staticmethod
    def getNextOrderId():
-      OptionStrategyOrder.orderCount += 1
-      return OptionStrategyOrder.orderCount
+      OptionStrategyOrderCore.orderCount += 1
+      return OptionStrategyOrderCore.orderCount
 
 
    # \param[in] context is a reference to the QCAlgorithm instance. The following attributes are used from the context:
@@ -143,7 +143,7 @@ class OptionStrategyOrderCore:
       self.strategyBuilder = StrategyBuilder(context)
 
       # Initialize the parameters dictionary with the default values
-      self.parameters = OptionStrategyOrder.defaultParameters.copy()
+      self.parameters = OptionStrategyOrderCore.defaultParameters.copy()
       # Override default parameters with values that might have been set in the context
       for key in self.parameters:
          if hasattr(context, key):
