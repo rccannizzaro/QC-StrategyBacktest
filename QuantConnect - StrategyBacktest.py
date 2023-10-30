@@ -403,7 +403,15 @@ class StrategyBacktest(QCAlgorithm):
       
       # Set the option chain filter function
       option.SetFilter(self.optionChainFilter)
-            
+
+
+      # Set the underlying price at market open. In order to do that schedule an event.
+      self.underlyingPriceAtOpen = None
+      self.Schedule.On(
+         self.DateRules.EveryDay(self.underlyingSymbol)
+         , self.TimeRules.AfterMarketOpen(self.underlyingSymbol, minutesAfterOpen = 1)
+         , self.storeUnderlyingOpenPrice
+      )
       # -----------------------------------------------------------------------------
       # Scheduled functions (every xx minutes)
       # -----------------------------------------------------------------------------
@@ -412,7 +420,13 @@ class StrategyBacktest(QCAlgorithm):
       #                 , Action(self.openPosition)
       #                 )
 
+   # Returns the underlying symbol current price.
+   def underlyingPrice(self):
+      return self.Securities[self.underlyingSymbol].Price
 
+   # Stores the underlyingPrice in a variable that we can later access
+   def storeUnderlyingOpenPrice(self):
+      self.underlyingPriceAtOpen = self.underlyingPrice
 
    # Initialize the security every time that a new one is added
    def OnSecuritiesChanged(self, changes):
@@ -463,11 +477,11 @@ class StrategyBacktest(QCAlgorithm):
          return None
 
       # Get the latest price of the underlying
-      underlyingLastPrice = self.Securities[self.underlyingSymbol].Price
+      underlyingLastPrice = self.underlyingPrice()
 
       # Find the ATM strike
       atm_strike = sorted(filteredSymbols
-                          ,key = lambda x: abs(x.ID.StrikePrice - self.Securities[self.underlyingSymbol].Price)
+                          ,key = lambda x: abs(x.ID.StrikePrice - self.underlyingPrice())
                           )[0].ID.StrikePrice
       
       # Get the list of available strikes
