@@ -375,8 +375,12 @@ class StrategyBacktest(QCAlgorithm):
       self.positionTracking = {}
       
       # Add the underlying
-      if self.ticker in ["SPX", "VIX"]:
-         # Underlying is an index
+      if self.ticker in ["SPX"]:
+         # Underlying is SPX, trading SPXW
+         underlying = self.AddIndex(self.ticker, self.timeResolution)
+         option = self.AddIndexOption(underlying.Symbol, "SPXW", self.timeResolution)
+      elif self.ticker in ["VIX"]:
+         # Underlying is VIX
          underlying = self.AddIndex(self.ticker, self.timeResolution)
          option = self.AddIndexOption(underlying.Symbol, self.timeResolution)
       else:
